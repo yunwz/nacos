@@ -32,12 +32,13 @@ storage plugin or operational synchronization outside this implementation.
 Enable the implementation with:
 
 ```properties
-nacos.plugin.control.manager.type=nacos
+nacos.plugin.control.type=nacos
 ```
 
-If this property is absent, the control manager center uses no-limit managers.
-If the `nacos` builder fails to create either manager, that manager falls back to
-the no-limit implementation and logs the failure.
+`nacos.plugin.control.manager.type=nacos` remains a compatibility alias. If
+neither property is present, the control manager center uses no-limit managers.
+If the `nacos` builder fails to create either manager, that manager falls back
+to the no-limit implementation and logs the failure.
 
 ## Local Rule Files
 
@@ -60,6 +61,10 @@ When changed, rule files are read from:
 ${expectedDir}/data/connection/limitRule
 ${expectedDir}/data/tps/{pointName}
 ```
+
+`pointName` must resolve to one direct child file below `data/tps`. The local
+storage rejects directory-control names, path separators, absolute paths, and
+normalized paths outside that directory.
 
 Connection rule example:
 

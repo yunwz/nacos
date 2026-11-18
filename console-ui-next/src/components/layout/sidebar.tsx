@@ -14,8 +14,6 @@ import {
   Settings,
   ChevronDown,
   ChevronRight,
-  PanelLeftClose,
-  PanelLeft,
   Puzzle,
   History,
   Radio,
@@ -58,19 +56,30 @@ export function Sidebar() {
   const { t } = useTranslation();
   const location = useLocation();
   const navigate = useNavigate();
-  const { sidebarCollapsed, toggleSidebar } = useAppStore();
+  const { sidebarCollapsed } = useAppStore();
   const { globalAdmin } = useAuthStore();
   const { version, startupMode, functionMode, copilotEnabled, aiEnabled } = useServerStore();
   const { currentNamespace, namespaceShowName } = useNamespaceStore();
-  const [platformOpen, setPlatformOpen] = useState(false);
+  const platformPaths = [
+    '/namespace',
+    '/clusterManagement',
+    '/pluginManagement',
+    '/userManagement',
+    '/rolesManagement',
+    '/permissionsManagement',
+    '/settingCenter',
+  ];
+  const platformActive = platformPaths.some((p) => location.pathname === p);
+  const [platformOpen, setPlatformOpen] = useState(platformActive);
+  const [previousPlatformActive, setPreviousPlatformActive] = useState(platformActive);
 
-  // Auto-expand platform section if current path is within it
-  useEffect(() => {
-    const platformPaths = ['/namespace', '/clusterManagement', '/pluginManagement', '/userManagement', '/rolesManagement', '/permissionsManagement'];
-    if (platformPaths.some((p) => location.pathname === p)) {
+  // Auto-open on navigation while allowing manual collapse on the active page.
+  if (platformActive !== previousPlatformActive) {
+    setPreviousPlatformActive(platformActive);
+    if (platformActive) {
       setPlatformOpen(true);
     }
-  }, [location.pathname]);
+  }
 
   const coreItems: NavItem[] = [];
 
@@ -151,6 +160,15 @@ export function Sidebar() {
     });
   }
 
+  if (copilotEnabled) {
+    platformItems.push({
+      key: 'settings',
+      label: t('menu.settingCenter'),
+      icon: <Settings size={18} />,
+      path: '/settingCenter',
+    });
+  }
+
   const navTo = useCallback(
     (url: string) => {
       const params = new URLSearchParams();
@@ -222,7 +240,7 @@ export function Sidebar() {
           {/* Core Section Label */}
           {!sidebarCollapsed && (
             <div className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-              {t('menu.configManagement').split('').length > 0 ? '核心功能' : 'Core'}
+              {t('menu.coreFeatures')}
             </div>
           )}
 
@@ -310,33 +328,13 @@ export function Sidebar() {
       </ScrollArea>
 
       {/* Bottom Section */}
-      <div className="border-t border-sidebar-border p-2 space-y-1">
+      <div className="border-t border-sidebar-border px-2 py-3">
         {!sidebarCollapsed && (
-          <div className="px-3 py-1.5 text-xs text-muted-foreground text-center">
+          <div className="min-h-5 px-2 text-center text-xs leading-5 text-muted-foreground">
             {version && `v${version}`}
             {startupMode && ` · ${startupMode}`}
           </div>
         )}
-        {copilotEnabled && (
-          <NavLink
-            item={{
-              key: 'settings',
-              label: t('menu.settingCenter'),
-              icon: <Settings size={18} />,
-              path: '/settingCenter',
-            }}
-            collapsed={sidebarCollapsed}
-            active={isActive('/settingCenter')}
-            onClick={() => navTo('/settingCenter')}
-          />
-        )}
-        <button
-          onClick={toggleSidebar}
-          className="flex w-full items-center justify-center gap-2 rounded-md px-2 py-2 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
-        >
-          {sidebarCollapsed ? <PanelLeft size={18} /> : <PanelLeftClose size={18} />}
-          {!sidebarCollapsed && <span className="text-xs">{t('common.collapse') || 'Collapse'}</span>}
-        </button>
       </div>
     </aside>
   );
@@ -407,12 +405,17 @@ function NavGroup({
   iconForChild: (key: string) => React.ReactNode;
 }) {
   const [open, setOpen] = useState(isGroupActive || !!item.defaultOpen);
+  const [previousGroupActive, setPreviousGroupActive] = useState(isGroupActive);
   const [flyoutOpen, setFlyoutOpen] = useState(false);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    if (isGroupActive) setOpen(true);
-  }, [isGroupActive]);
+  // Auto-open on navigation while allowing manual collapse on the active page.
+  if (isGroupActive !== previousGroupActive) {
+    setPreviousGroupActive(isGroupActive);
+    if (isGroupActive) {
+      setOpen(true);
+    }
+  }
 
   useEffect(() => {
     return () => { if (closeTimer.current) clearTimeout(closeTimer.current); };

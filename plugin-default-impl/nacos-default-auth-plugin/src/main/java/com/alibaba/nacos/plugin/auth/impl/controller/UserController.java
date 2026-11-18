@@ -19,11 +19,12 @@ package com.alibaba.nacos.plugin.auth.impl.controller;
 import com.alibaba.nacos.api.annotation.Since;
 import com.alibaba.nacos.api.common.ApiType;
 import com.alibaba.nacos.api.common.Constants;
+import com.alibaba.nacos.auth.config.NacosAuthConfig;
+import com.alibaba.nacos.auth.config.NacosAuthConfigHolder;
 import com.alibaba.nacos.common.model.RestResultUtils;
 import com.alibaba.nacos.core.controller.compatibility.Compatibility;
 import com.alibaba.nacos.plugin.auth.exception.AccessException;
 import com.alibaba.nacos.plugin.auth.impl.authenticate.IAuthenticationManager;
-import com.alibaba.nacos.plugin.auth.impl.configuration.AuthConfigs;
 import com.alibaba.nacos.plugin.auth.impl.constant.AuthConstants;
 import com.alibaba.nacos.plugin.auth.impl.constant.AuthSystemTypes;
 import com.alibaba.nacos.plugin.auth.impl.token.TokenManagerDelegate;
@@ -31,6 +32,7 @@ import com.alibaba.nacos.plugin.auth.impl.users.NacosUser;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -58,18 +60,15 @@ public class UserController {
     
     private final TokenManagerDelegate jwtTokenManager;
     
-    private final AuthConfigs authConfigs;
-    
     private final IAuthenticationManager iAuthenticationManager;
     
     @Deprecated
     private final AuthenticationManager authenticationManager;
     
-    public UserController(TokenManagerDelegate jwtTokenManager, AuthConfigs authConfigs,
+    public UserController(TokenManagerDelegate jwtTokenManager,
         IAuthenticationManager iAuthenticationManager,
         AuthenticationManager authenticationManager) {
         this.jwtTokenManager = jwtTokenManager;
-        this.authConfigs = authConfigs;
         this.iAuthenticationManager = iAuthenticationManager;
         this.authenticationManager = authenticationManager;
     }
@@ -92,10 +91,16 @@ public class UserController {
         HttpServletResponse response,
         HttpServletRequest request) throws AccessException, IOException {
         
-        if (AuthSystemTypes.NACOS.name().equalsIgnoreCase(authConfigs.getNacosAuthSystemType())
-            || AuthSystemTypes.LDAP.name().equalsIgnoreCase(authConfigs.getNacosAuthSystemType())) {
-            
-            NacosUser user = iAuthenticationManager.authenticate(request);
+        String authSystemType = getServerAuthConfig().getNacosAuthSystemType();
+        if (AuthSystemTypes.NACOS.name().equalsIgnoreCase(authSystemType)
+            || AuthSystemTypes.LDAP.name().equalsIgnoreCase(authSystemType)) {
+            NacosUser user;
+            try {
+                user = iAuthenticationManager.authenticate(request);
+            } catch (AccessException ignored) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body(AuthConstants.INVALID_CREDENTIALS_MESSAGE);
+            }
             
             response.addHeader(AuthConstants.AUTHORIZATION_HEADER,
                 AuthConstants.TOKEN_PREFIX + user.getToken());
@@ -121,5 +126,10 @@ public class UserController {
         } catch (BadCredentialsException authentication) {
             return RestResultUtils.failed(HttpStatus.UNAUTHORIZED.value(), null, "Login failed");
         }
+    }
+    
+    private NacosAuthConfig getServerAuthConfig() {
+        return NacosAuthConfigHolder.getInstance()
+            .getNacosAuthConfigByScope(ApiType.OPEN_API.name());
     }
 }

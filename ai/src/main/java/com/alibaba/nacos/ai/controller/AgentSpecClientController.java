@@ -22,6 +22,7 @@ import com.alibaba.nacos.ai.form.agentspecs.client.AgentSpecQueryForm;
 import com.alibaba.nacos.ai.form.agentspecs.client.AgentSpecSearchForm;
 import com.alibaba.nacos.ai.service.agentspecs.AgentSpecOperationService;
 import com.alibaba.nacos.ai.service.agentspecs.AgentSpecQueryResult;
+import com.alibaba.nacos.ai.service.search.AiResourceSearchApplicationService;
 import com.alibaba.nacos.ai.utils.AgentSpecRequestUtil;
 import com.alibaba.nacos.api.ai.model.agentspecs.AgentSpec;
 import com.alibaba.nacos.api.ai.model.agentspecs.AgentSpecBasicInfo;
@@ -31,6 +32,7 @@ import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.model.Page;
 import com.alibaba.nacos.api.model.v2.Result;
 import com.alibaba.nacos.auth.annotation.Secured;
+import com.alibaba.nacos.auth.parser.http.AgentSpecNameHttpResourceParser;
 import com.alibaba.nacos.core.model.form.PageForm;
 import com.alibaba.nacos.core.paramcheck.ExtractorManager;
 import com.alibaba.nacos.plugin.auth.constant.ActionTypes;
@@ -55,8 +57,12 @@ public class AgentSpecClientController {
     
     private final AgentSpecOperationService agentSpecOperationService;
     
-    public AgentSpecClientController(AgentSpecOperationService agentSpecOperationService) {
+    private final AiResourceSearchApplicationService searchService;
+    
+    public AgentSpecClientController(AgentSpecOperationService agentSpecOperationService,
+        AiResourceSearchApplicationService searchService) {
         this.agentSpecOperationService = agentSpecOperationService;
+        this.searchService = searchService;
     }
     
     /**
@@ -69,9 +75,8 @@ public class AgentSpecClientController {
         throws NacosException {
         form.validate();
         pageForm.validate();
-        return Result.success(
-            agentSpecOperationService.searchAgentSpecs(form.getNamespaceId(), form.getKeyword(),
-                pageForm.getPageNo(), pageForm.getPageSize()));
+        return Result.success(searchService.searchAgentSpecs(form, pageForm.getPageNo(),
+            pageForm.getPageSize()));
     }
     
     /**
@@ -81,7 +86,7 @@ public class AgentSpecClientController {
     @Since("3.2.0")
     @GetMapping
     @Secured(action = ActionTypes.READ, signType = SignType.AI, apiType = ApiType.OPEN_API,
-        tags = {ALLOW_ANONYMOUS})
+        parser = AgentSpecNameHttpResourceParser.class, tags = {ALLOW_ANONYMOUS})
     public ResponseEntity<Result<AgentSpec>> get(AgentSpecQueryForm form)
         throws NacosException {
         form.validate();

@@ -206,6 +206,10 @@ public class AgentSpecAdminApiOpenApiITCase extends AiAdminApiBaseITCase {
         assertTrue("online".equals(submittedStatus) || "reviewing".equals(submittedStatus),
                 submittedStatus);
         if ("reviewing".equals(submittedStatus)) {
+            JsonNode resubmit = postFormOk(ADMIN_AGENT_SPEC_PATH + "/submit",
+                    agentSpecQueryForm(agentSpecName));
+            assertEquals("2.0.0", resubmit.get("data").asText(), resubmit.toString());
+            assertAgentSpecVersionStatus(agentSpecName, "2.0.0", "reviewing");
             postFormOk(ADMIN_AGENT_SPEC_PATH + "/force-publish",
                     agentSpecPublishForm(agentSpecName, "2.0.0"));
         }
@@ -224,7 +228,7 @@ public class AgentSpecAdminApiOpenApiITCase extends AiAdminApiBaseITCase {
                 ErrorCode.PARAMETER_MISSING, "agentSpecName");
         assertError(putRaw(ADMIN_AGENT_SPEC_PATH + "/draft",
                 agentSpecQuery(randomAiName("missing-card"))), 400,
-                ErrorCode.PARAMETER_MISSING, "agentSpecCard");
+                ErrorCode.PARAMETER_VALIDATE_ERROR, "agentSpecCard");
 
         Map<String, String> invalidVersion = agentSpecDraftForm(randomAiName("bad-version"),
                 "bad-version");

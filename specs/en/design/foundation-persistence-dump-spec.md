@@ -103,6 +103,40 @@ behavior for a database platform. They must not change logical data meaning,
 schema ownership, authorization, or resource identity. See the
 [Datasource Dialect Plugin Spec](../plugin/datasource-dialect-plugin-spec.md).
 
+### 3.1 Embedded Derby Runtime Contract
+
+The embedded storage runtime uses Derby 10.16.1.1 on the server's Java 17
+baseline. Its split artifacts have the following responsibilities:
+
+| Artifact | Responsibility in Nacos |
+| --- | --- |
+| `org.apache.derby:derby` | Embedded database engine, including `org.apache.derby.iapi.jdbc.AutoloadedDriver`. |
+| `org.apache.derby:derbyshared` | Shared runtime classes, including `org.apache.derby.shared.common.stream.InfoStreams`. |
+| `org.apache.derby:derbytools` | Provides `org.apache.derby.jdbc.EmbeddedDriver`, which Nacos explicitly loads. |
+
+Runtime assembly rules:
+
+- all three artifacts must use the root `derby.version`; the runtime must not
+  mix Derby versions;
+- the server distribution must include all three artifacts under `plugins/`;
+  bundling only the engine JAR is insufficient for Nacos embedded storage;
+- modules that directly reference `EmbeddedDriver` must make `derbytools`
+  available in the corresponding compilation or test scope; a `provided`
+  dependency still requires the distribution to supply it at runtime;
+- GraalVM runtime hints, reflection metadata, and runtime initialization
+  configuration must use the class locations in the selected Derby version.
+  Internal Derby class names used by native-image integration are implementation
+  details, not Nacos public APIs.
+
+Embedded storage selection, database location, and logical schema follow the
+datasource and domain contracts. Normal startup uses
+`jdbc:derby:...;create=true` without `upgrade=true`. Database schema migrations
+follow the corresponding domain specs.
+
+See the [Derby 10.16.1.1 release notes](https://db.apache.org/derby/releases/release-10_16_1_1.cgi)
+and [Derby module overview](https://db.apache.org/derby/docs/10.16/publishedapi/)
+for upstream runtime requirements and artifact responsibilities.
+
 ## 4. Repository Contract
 
 Repository services define domain storage semantics above datasource details.
@@ -176,6 +210,13 @@ Reads use the CP read path when distributed embedded storage is active. Startup
 dump may set a blocking read context so the node waits until readable data
 exists before rebuilding serving cache.
 
+Distributed embedded read requests must validate their declared result target
+before JDBC execution. Mapper-based queries may use only row mapper class names
+registered with the persistence row mapper registry. Scalar queries may use only
+explicitly allowlisted basic result types, resolved from fixed class constants
+instead of request-driven class loading. A missing, unknown, or target
+incompatible with the query type must fail the read request.
+
 Snapshot rules are defined by the
 [CP Consistency Spec](foundation-cp-consistency-spec.md). Embedded storage must
 provide enough snapshot data to rebuild local Derby state after restart or
@@ -243,6 +284,10 @@ Rules:
   directories, separated by namespace-aware and no-namespace paths;
 - dump storage keys must be derived from validated and encoded Config identity
   fields;
+- an unsafe derived identity must fail closed with a bounded, control-character-
+  safe diagnostic. Processing one rejected identity must not prevent unrelated
+  dump identities from running, and existing task retry or startup-failure
+  semantics must remain unchanged;
 - changing the local dump backend must not change Config resource identity,
   md5 semantics, authorization, or the durable persistence source.
 

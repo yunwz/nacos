@@ -34,6 +34,7 @@ import {
   Tag,
   GitBranch,
   Download,
+  GitCompareArrows,
 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -43,7 +44,6 @@ import { Badge } from '@/components/ui/badge';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   Select,
   SelectContent,
@@ -77,9 +77,18 @@ import { parsePipelineInfo } from '@/types/skill';
 import { PromptVersionTimeline } from '@/pages/promptManagement/components/PromptVersionTimeline';
 import { PipelineStatusDisplay } from '@/pages/skillManagement/components/PipelineStatusDisplay';
 import { LabelBindDialog } from '@/components/ai/LabelBindDialog';
+import { AiVersionSelectOption } from '@/components/ai/AiVersionSelectOption';
+import { CreateDraftFromVersionButton } from '@/components/ai/CreateDraftFromVersionButton';
+import {
+  VersionLifecycleActionBar,
+  VersionLifecycleActionDivider,
+} from '@/components/ai/VersionLifecycleActionBar';
+import { canForcePublish, canResubmitReview } from '@/components/ai/version-lifecycle';
 import { BizTagEditDialog } from '@/components/ai/BizTagEditDialog';
 import { DetailTagChip } from '@/components/ai/DetailTagChip';
 import { CliCommandCard } from '@/components/ai/CliCommandCard';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { PromptVersionDiffPanel } from './PromptVersionDiffPanel';
 
 function extractVariables(template: string): string[] {
   if (!template) return [];
@@ -134,6 +143,7 @@ export default function PromptDetailPage() {
   const [template, setTemplate] = useState('');
   const [selectedVersion, setSelectedVersion] = useState<string | null>(null);
   const [isEditingDraft, setIsEditingDraft] = useState(false);
+  const [activeTab, setActiveTab] = useState('template');
   const [savingDraft, setSavingDraft] = useState(false);
   const [editCommitMsg, setEditCommitMsg] = useState('');
   const [editVariables, setEditVariables] = useState<Array<{ name: string; defaultValue: string; description: string }>>([]);
@@ -193,11 +203,18 @@ export default function PromptDetailPage() {
   const currentVersionSummary = meta?.versionDetails?.find((v) => v.version === selectedVersion);
   const currentPipelineInfoRaw = currentVersionSummary?.publishPipelineInfo;
   const currentPipelineInfo = parsePipelineInfo(currentPipelineInfoRaw);
+  const showResubmitReview = canResubmitReview(currentVersionStatus, currentPipelineInfo);
+  const showForcePublish = canForcePublish(
+    currentVersionStatus,
+    currentPipelineInfo,
+    globalAdmin,
+  );
 
   // Labels bound to the currently selected version
   const currentVersionLabels = Object.entries(labelsMap).filter(
     ([, val]) => val === selectedVersion,
   );
+  const showVersionDiff = !isEditingDraft && (meta?.versionDetails?.length ?? 0) >= 2;
 
   // Load governance detail
   const loadGovernance = useCallback(async () => {
@@ -254,6 +271,12 @@ export default function PromptDetailPage() {
       setVariableValues(initialVals);
     }
   }, [versionInfo]);
+
+  useEffect(() => {
+    if (!showVersionDiff && activeTab === 'diff') {
+      setActiveTab('template');
+    }
+  }, [showVersionDiff, activeTab]);
 
   const handleSelectVersion = (version: string) => {
     setSelectedVersion(version);
@@ -418,7 +441,10 @@ export default function PromptDetailPage() {
     }
   };
 
-  const handleStartEdit = () => setIsEditingDraft(true);
+  const handleStartEdit = () => {
+    setActiveTab('template');
+    setIsEditingDraft(true);
+  };
 
   const handleCancelEdit = () => {
     if (versionInfo) {
@@ -698,41 +724,23 @@ export default function PromptDetailPage() {
                     <SelectValue placeholder={t('prompt.selectVersion')} />
                   </SelectTrigger>
                   <SelectContent>
-                    {meta.versionDetails.map((v) => {
-                      const vPipeline = parsePipelineInfo(v.publishPipelineInfo);
-                      const isVersionPendingPublish = (v.status === 'reviewed' && vPipeline?.status !== 'REJECTED') || (v.status === 'reviewing' && vPipeline?.status === 'APPROVED');
-                      const isVersionRejected = v.status === 'reviewed' && vPipeline?.status === 'REJECTED';
-                      return (
+                    {meta.versionDetails.map((v) => (
                       <SelectItem key={v.version} value={v.version}>
-                        <span className="flex items-center gap-2">
-                          <span>{v.version}</span>
-                          {meta.labels?.latest === v.version && (
-                            <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300 text-[10px] px-1 py-0 border-0">
-                              {t('prompt.latestVersion')}
-                            </Badge>
-                          )}
-                          {v.status === 'draft' && (
-                            <Badge className="bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300 text-[10px] px-1 py-0 border-0">
-                              {t('prompt.versionStatus.draft')}
-                            </Badge>
-                          )}
-                          {isVersionRejected && (
-                            <Badge className="bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300 text-[10px] px-1 py-0 border-0">
-                              {t('prompt.versionStatus.rejected')}
-                            </Badge>
-                          )}
-                          {!isVersionRejected && (v.status === 'reviewing' || v.status === 'reviewed') && (
-                            <Badge className={isVersionPendingPublish
-                              ? 'bg-teal-100 text-teal-700 dark:bg-teal-950/50 dark:text-teal-300 text-[10px] px-1 py-0 border-0'
-                              : 'bg-blue-100 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300 text-[10px] px-1 py-0 border-0'
-                            }>
-                              {t(isVersionPendingPublish ? 'prompt.versionStatus.pendingPublish' : 'prompt.versionStatus.reviewing')}
-                            </Badge>
-                          )}
-                        </span>
+                        <AiVersionSelectOption
+                          version={v.version}
+                          status={v.status}
+                          latest={meta.labels?.latest === v.version}
+                          publishPipelineInfo={v.publishPipelineInfo}
+                          labels={{
+                            latest: t('prompt.latestVersion'),
+                            draft: t('prompt.versionStatus.draft'),
+                            reviewing: t('prompt.versionStatus.reviewing'),
+                            pendingPublish: t('prompt.versionStatus.pendingPublish'),
+                            rejected: t('prompt.versionStatus.rejected'),
+                          }}
+                        />
                       </SelectItem>
-                    );
-                    })}
+                    ))}
                   </SelectContent>
                 </Select>
               )}
@@ -801,8 +809,7 @@ export default function PromptDetailPage() {
 
               {/* Version lifecycle action buttons */}
               {selectedVersion && currentVersionStatus && (
-                <div className="mt-3 pt-3 border-t border-border/40">
-                  <div className="flex items-center gap-2 flex-wrap">
+                <VersionLifecycleActionBar>
                     {/* Draft actions */}
                     {currentVersionStatus === 'draft' && (
                       <>
@@ -823,7 +830,7 @@ export default function PromptDetailPage() {
                               <Pencil className="h-3 w-3" />
                               {t('prompt.editDraft')}
                             </Button>
-                            <div className="h-4 w-px bg-border mx-0.5" />
+                            <VersionLifecycleActionDivider />
                             <Button size="sm" className="h-7 text-xs gap-1.5" disabled={actionLoading} onClick={() => handleSubmit(selectedVersion)}>
                               <Send className="h-3 w-3" />
                               {currentPipelineInfo && currentPipelineInfo.status === 'REJECTED'
@@ -837,7 +844,7 @@ export default function PromptDetailPage() {
                             {currentPipelineInfo && currentPipelineInfo.status === 'REJECTED' && (
                               <PipelineStatusDisplay pipelineInfo={currentPipelineInfo} compact />
                             )}
-                            {globalAdmin && currentPipelineInfo && currentPipelineInfo.status === 'REJECTED' && !currentPipelineInfo.historical && (
+                            {showForcePublish && (
                               <Button
                                 variant="outline"
                                 size="sm"
@@ -857,6 +864,18 @@ export default function PromptDetailPage() {
                     {/* Reviewing / Reviewed actions */}
                     {(currentVersionStatus === 'reviewing' || currentVersionStatus === 'reviewed') && (
                       <>
+                        {showResubmitReview && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 text-xs gap-1.5"
+                            disabled={actionLoading}
+                            onClick={() => handleSubmit(selectedVersion)}
+                          >
+                            <Send className="h-3 w-3" />
+                            {t('prompt.resubmit')}
+                          </Button>
+                        )}
                         <Button
                           size="sm"
                           className="h-7 text-xs gap-1.5"
@@ -895,7 +914,7 @@ export default function PromptDetailPage() {
                         {currentPipelineInfo && currentPipelineInfo.status === 'APPROVED' && (
                           <PipelineStatusDisplay pipelineInfo={currentPipelineInfo} compact />
                         )}
-                        {globalAdmin && currentPipelineInfo && currentPipelineInfo.status === 'REJECTED' && (
+                        {showForcePublish && (
                           <>
                             <PipelineStatusDisplay pipelineInfo={currentPipelineInfo} compact />
                             <Button
@@ -931,32 +950,38 @@ export default function PromptDetailPage() {
 
                     {/* Create draft from (online/offline) */}
                     {(currentVersionStatus === 'online' || currentVersionStatus === 'offline') && (() => {
-                      const btn = (
-                        <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" disabled={hasDraft || actionLoading} onClick={() => handleCreateDraft(selectedVersion)}>
-                          <Plus className="h-3 w-3" />
-                          {t('prompt.createDraftFrom')}
-                        </Button>
+                      return (
+                        <CreateDraftFromVersionButton
+                          label={t('prompt.createDraftFrom')}
+                          blocked={hasDraft}
+                          blockedMessage={t('prompt.draftExistsTip')}
+                          disabled={actionLoading}
+                          onClick={() => handleCreateDraft(selectedVersion)}
+                        />
                       );
-                      return hasDraft ? (
-                        <Tooltip>
-                          <TooltipTrigger asChild><span>{btn}</span></TooltipTrigger>
-                          <TooltipContent className="bg-amber-50 border border-amber-200 text-amber-800 dark:bg-amber-950 dark:border-amber-800 dark:text-amber-200">
-                            <span className="flex items-center gap-1.5">
-                              <AlertCircle className="h-3 w-3 shrink-0" />
-                              {t('prompt.draftExistsTip')}
-                            </span>
-                          </TooltipContent>
-                        </Tooltip>
-                      ) : btn;
                     })()}
-                  </div>
-                </div>
+                </VersionLifecycleActionBar>
               )}
             </div>
           </div>
         </div>
       </div>
 
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
+        <TabsList className="w-fit">
+          <TabsTrigger value="template" className="gap-1.5">
+            <Sparkles className="h-3.5 w-3.5" />
+            {t('prompt.template')}
+          </TabsTrigger>
+          {showVersionDiff && (
+            <TabsTrigger value="diff" className="gap-1.5">
+              <GitCompareArrows className="h-3.5 w-3.5" />
+              {t('prompt.versionDiff')}
+            </TabsTrigger>
+          )}
+        </TabsList>
+
+        <TabsContent value="template">
       {/* ===== Content Grid ===== */}
       <div className={cn('grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_320px]', loading && 'opacity-50 pointer-events-none')}>
         {/* Left: Template + Debug */}
@@ -1283,6 +1308,19 @@ export default function PromptDetailPage() {
           </Card>
         </div>
       </div>
+        </TabsContent>
+
+        {showVersionDiff && (
+          <TabsContent value="diff" forceMount className="data-[state=inactive]:hidden">
+            <PromptVersionDiffPanel
+              namespaceId={namespaceId}
+              promptKey={promptKey}
+              versions={meta.versionDetails || []}
+              selectedVersion={selectedVersion || ''}
+            />
+          </TabsContent>
+        )}
+      </Tabs>
 
       {/* ===== Version History Sheet ===== */}
       <Sheet open={versionSheetOpen} onOpenChange={setVersionSheetOpen}>

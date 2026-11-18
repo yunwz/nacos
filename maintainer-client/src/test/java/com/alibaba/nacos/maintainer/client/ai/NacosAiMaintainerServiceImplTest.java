@@ -65,6 +65,7 @@ import static org.mockito.Mockito.when;
  *
  * @author nacos
  */
+@SuppressWarnings("deprecation")
 @ExtendWith(MockitoExtension.class)
 public class NacosAiMaintainerServiceImplTest {
     
@@ -89,6 +90,12 @@ public class NacosAiMaintainerServiceImplTest {
             AiMaintainerHttpContext.class.getDeclaredField("clientHttpProxy");
         clientHttpProxyField.setAccessible(true);
         clientHttpProxyField.set(context, clientHttpProxy);
+    }
+    
+    @Test
+    void testAgentAndA2aDelegatesRemainAvailable() {
+        assertNotNull(aiMaintainerService.agent());
+        assertNotNull(aiMaintainerService.a2a());
     }
     
     @Test

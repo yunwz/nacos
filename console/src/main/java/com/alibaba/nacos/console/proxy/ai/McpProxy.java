@@ -17,6 +17,9 @@
 package com.alibaba.nacos.console.proxy.ai;
 
 import com.alibaba.nacos.api.ai.model.mcp.McpEndpointSpec;
+import com.alibaba.nacos.api.ai.model.mcp.McpServerVersionDetail;
+import com.alibaba.nacos.api.ai.model.mcp.McpServerVersionSummary;
+import com.alibaba.nacos.api.ai.model.mcp.McpResourceSpecification;
 import com.alibaba.nacos.api.ai.model.mcp.McpServerBasicInfo;
 import com.alibaba.nacos.api.ai.model.mcp.McpServerDetailInfo;
 import com.alibaba.nacos.api.ai.model.mcp.McpServerImportRequest;
@@ -27,6 +30,8 @@ import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.model.Page;
 import com.alibaba.nacos.console.handler.ai.McpHandler;
 import org.springframework.stereotype.Service;
+
+import java.util.Map;
 
 /**
  * Proxy class for handling AI MCP operations.
@@ -126,13 +131,134 @@ public class McpProxy {
     }
     
     /**
+     * Page standard lifecycle Version summaries.
+     */
+    public Page<McpServerVersionSummary> listMcpServerVersions(String namespaceId,
+        String mcpName, String status, int pageNo, int pageSize) throws NacosException {
+        return mcpHandler.listMcpServerVersions(namespaceId, mcpName, status, pageNo, pageSize);
+    }
+    
+    /**
+     * Read one exact standard lifecycle Version.
+     */
+    public McpServerVersionDetail getMcpServerVersion(String namespaceId, String mcpName,
+        String version) throws NacosException {
+        return mcpHandler.getMcpServerVersion(namespaceId, mcpName, version);
+    }
+    
+    /**
+     * Create one standard MCP draft.
+     */
+    public McpServerVersionDetail createMcpServerDraft(String namespaceId,
+        McpServerBasicInfo serverSpecification, McpToolSpecification toolSpecification,
+        McpResourceSpecification resourceSpecification,
+        McpEndpointSpec endpointSpecification) throws NacosException {
+        return mcpHandler.createMcpServerDraft(namespaceId, serverSpecification,
+            toolSpecification, resourceSpecification, endpointSpecification);
+    }
+    
+    /**
+     * Replace one exact standard MCP draft.
+     */
+    public McpServerVersionDetail updateMcpServerDraft(String namespaceId,
+        McpServerBasicInfo serverSpecification, McpToolSpecification toolSpecification,
+        McpResourceSpecification resourceSpecification,
+        McpEndpointSpec endpointSpecification) throws NacosException {
+        return mcpHandler.updateMcpServerDraft(namespaceId, serverSpecification,
+            toolSpecification, resourceSpecification, endpointSpecification);
+    }
+    
+    /**
+     * Delete one exact standard MCP draft.
+     */
+    public void deleteMcpServerDraft(String namespaceId, String mcpName, String version)
+        throws NacosException {
+        mcpHandler.deleteMcpServerDraft(namespaceId, mcpName, version);
+    }
+    
+    /**
+     * Submit one standard MCP Version.
+     */
+    public McpServerVersionSummary submitMcpServerVersion(String namespaceId, String mcpName,
+        String version) throws NacosException {
+        return mcpHandler.submitMcpServerVersion(namespaceId, mcpName, version);
+    }
+    
+    /**
+     * Publish one standard MCP Version.
+     */
+    public McpServerVersionSummary publishMcpServerVersion(String namespaceId, String mcpName,
+        String version) throws NacosException {
+        return mcpHandler.publishMcpServerVersion(namespaceId, mcpName, version);
+    }
+    
+    /**
+     * Force-publish one standard MCP Version.
+     */
+    public McpServerVersionSummary forcePublishMcpServerVersion(String namespaceId,
+        String mcpName, String version) throws NacosException {
+        return mcpHandler.forcePublishMcpServerVersion(namespaceId, mcpName, version);
+    }
+    
+    /**
+     * Return one reviewed standard MCP Version to draft.
+     */
+    public McpServerVersionSummary redraftMcpServerVersion(String namespaceId, String mcpName,
+        String version) throws NacosException {
+        return mcpHandler.redraftMcpServerVersion(namespaceId, mcpName, version);
+    }
+    
+    /**
+     * Bring one standard MCP Version online.
+     */
+    public McpServerVersionSummary onlineMcpServerVersion(String namespaceId, String mcpName,
+        String version) throws NacosException {
+        return mcpHandler.onlineMcpServerVersion(namespaceId, mcpName, version);
+    }
+    
+    /**
+     * Take one standard MCP Version offline.
+     */
+    public McpServerVersionSummary offlineMcpServerVersion(String namespaceId, String mcpName,
+        String version) throws NacosException {
+        return mcpHandler.offlineMcpServerVersion(namespaceId, mcpName, version);
+    }
+    
+    /**
+     * Replace custom MCP labels.
+     */
+    public Map<String, String> updateMcpServerLabels(String namespaceId, String mcpName,
+        Map<String, String> labels) throws NacosException {
+        return mcpHandler.updateMcpServerLabels(namespaceId, mcpName, labels);
+    }
+    
+    /**
+     * Enable or disable one MCP Server Resource.
+     */
+    public void updateMcpServerStatus(String namespaceId, String mcpName, boolean enabled)
+        throws NacosException {
+        mcpHandler.updateMcpServerStatus(namespaceId, mcpName, enabled);
+    }
+    
+    /**
+     * Update one MCP Server Resource visibility scope.
+     */
+    public void updateMcpServerScope(String namespaceId, String mcpName, String scope)
+        throws NacosException {
+        mcpHandler.updateMcpServerScope(namespaceId, mcpName, scope);
+    }
+    
+    /**
      * Validate MCP server import request.
      *
      * @param namespaceId namespace id for mcp servers
      * @param request     import request containing data and settings
      * @return validation result with details about potential issues
      * @throws NacosException any exception during validation
+     * @deprecated use the unified AI resource import validation API instead. Planned for removal
+     *     in Nacos 3.4.0.
      */
+    @Deprecated
     public McpServerImportValidationResult validateImport(String namespaceId,
         McpServerImportRequest request) throws NacosException {
         return mcpHandler.validateImport(namespaceId, request);
@@ -145,7 +271,10 @@ public class McpProxy {
      * @param request     import request containing data and settings
      * @return import response with results and statistics
      * @throws NacosException any exception during import execution
+     * @deprecated use the unified AI resource import execute API instead. Planned for removal in
+     *     Nacos 3.4.0.
      */
+    @Deprecated
     public McpServerImportResponse executeImport(String namespaceId, McpServerImportRequest request)
         throws NacosException {
         return mcpHandler.executeImport(namespaceId, request);

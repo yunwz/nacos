@@ -34,7 +34,7 @@
 | --- | --- |
 | `draft` | 正在编辑的版本。 |
 | `reviewing` | 已提交到发布流水线审核。 |
-| `reviewed` | 流水线已通过，等待显式发布。 |
+| `reviewed` | 流水线审核已完成，等待显式发布、强制发布、退回编辑或重新提交。 |
 | `online` | 已发布且可查询。 |
 | `offline` | 已存在但从普通运行时路由中移除。 |
 
@@ -69,24 +69,45 @@ create/upload draft
 
 ## 4. 审核和发布规则
 
-- Submit 会解析明确版本或当前 `editingVersion`。
-- 当不存在 draft 目标时，Submit 必须失败。
-- Submit 仅允许目标版本处于 `draft` 状态；对 `reviewing` / `reviewed` / `online`
-  / `offline` 等非 draft 版本调用 Submit 必须返回 `INVALID_PARAM`，且不得修改版本
-  状态或元数据指针，避免污染正式版本。
+- Submit 会解析明确版本、当前 `editingVersion`，或处于 `reviewing` / `reviewed` 状态的
+  `reviewingVersion`。
+- 当不存在 draft、reviewing 或 reviewed 目标时，Submit 必须失败。
+- Submit 允许目标版本处于 `draft`、`reviewing` 或 `reviewed` 状态。`draft` 和
+  `reviewed` 进入审核或直接发布流程；`reviewed` 目标按重新提交处理，不能绕过流水线
+  直接进入发布流程；`reviewing` 目标按幂等调用处理，返回当前版本且不得重复启动流水线。
+- `reviewing` 版本遗留当前审核轮次的 `APPROVED` / `REJECTED` 终态结果时，视为审核完成
+  回调未完成状态切换，先收敛为 `reviewed` 再重新提交。标记为 `historical=true` 的结果属于
+  之前的审核轮次，不能据此判定当前审核已完成，Submit 仍按幂等调用返回。
+- 对 `online` / `offline` 等状态的版本调用 Submit 必须返回
+  `INVALID_PARAM`，且不得修改版本状态或元数据指针。
 - 审核中版本必须在元数据中记录为 `reviewingVersion`。
 - 流水线执行状态可以写入 `publishPipelineInfo` 和 `pipeline_execution`。
 - 流水线通过和拒绝都会把版本改为 `reviewed`；拒绝后如果需要继续编辑，用户必须显式
   redraft 该版本。
-- Publish 会把版本改为 `online`，清理 working 指针，按需增加 `onlineCnt`，并由服务端维护
-  `latest` label。
+- Publish 会把版本改为 `online`，清理 working 指针，按需增加 `onlineCnt`，并由服务端按照
+  资源类型规范维护 `latest` label。
+- 当某个资源类型还维护独立的兼容 Serving 投影时，生命周期 Row 是耐久的期望状态。投影在生命周期
+  变更后收敛，且只有投影重读验证成功后操作才返回成功。投影收敛失败时保留生命周期 Row，供幂等重试
+  或 Reconciler 完成投影。
 - Publish 和 force-publish 请求可以为兼容历史调用保留 `updateLatestLabel` 参数；
   该参数已废弃，新客户端不得继续发送。未指定或指定为 `true` 时，发布版本成为服务端维护的
   最新版本。标签更新 API 必须忽略客户端传入的 `latest` label key，并把当前服务端维护的
   `latest` 值合并回最终 labels map。
 - Force publish 会在跳过流水线通过校验的同时，执行与 publish 成功时一致的状态转换。
-- 任意上线/下线状态变更完成后，服务端必须基于当前在线版本重新计算 `latest`，
-  并指向最大的在线版本；没有任何在线版本时，服务端必须删除 `latest`。
+- 除非类型规范给出确定性细化，成功的 publish 或 online 操作会使目标版本成为 `latest`。
+  当前 latest 被删除或下线时，默认选择剩余 online Version 中最大的一个；不存在 online
+  Version 时删除 `latest`。类型细化仍必须保证 `latest` 由服务端管理、只指向 online Version，
+  并定义删除或下线时的回退规则。
+- Agent 类型只对旧 A2A 直接上线 facade 细化该规则：`setAsLatest=false` 可以保留当前有效指针。
+  标准 Agent publish 和 online 仍会移动 `latest`；当前指针被删除或下线时，选择剩余 online
+  Agent Version 中最大的一个。详见 [Agent 管理规范](agent-management-spec.md)和
+  [A2A Agent 规范](a2a-agent-spec.md)。
+- MCP 类型也具有同类的兼容专用 direct-online facade。通过旧 API 创建的新 Version 会立即
+  online，旧 latest 参数可以保留当前有效指针。历史更新 Facade 还可以覆盖已有精确
+  Version，但这只是需要审计的兼容例外；标准 Draft/生命周期 API 绝不得复用该放宽。标准 MCP
+  publish、force-publish 和 online 会移动 `latest`。Latest 回退依次选择最大的 SemVer、
+  数值最大的 `vN`，最后选择稳定且区分大小写的最大字符串。详见
+  [MCP Server 规范](mcp-server-spec.md)。
 
 流水线扩展行为由 [AI 发布流水线插件规范](../plugin/ai-pipeline-plugin-spec.md)定义。
 本领域规范只定义 AI 资源生命周期如何响应流水线结果。
@@ -105,8 +126,18 @@ create/upload draft
 
 - 删除版本应删除版本行和该版本的类型自有存储内容。
 - 删除资源应删除元数据、所有版本行和所有类型自有存储内容。
+- 删除资源前必须加载所有版本的存储描述符，再修改元数据。存储清理必须使用每个
+  描述符中持久化的 provider 路由，并尝试清理全部被引用的内容对象。
+- 全部描述符加载完成后，类型实现可以先把 Resource 及其 Version 转换为非 Serving 生命周期状态，
+  再收敛外部兼容投影并开始物理清理。在清理完成前，这些保留 Row 是耐久重试锚点。
+- 只有全部被引用的存储内容清理成功后，才能删除元数据和版本行。任一清理失败时，
+  删除操作必须返回失败，并保留重试所需的数据行和存储描述符。
 - 只有公开 API 契约明确说明缺失资源视为成功时，删除操作才应具备该幂等语义。
 - 删除 online 版本时，类型实现支持的情况下应更新 `onlineCnt` 或 labels。
+- 领域规范要求的类型自有物理清理必须进入类型 Storage Delete Callback，并且在 Metadata Row
+  删除前完成。MCP 自有 Direct Naming 清理和 MCP Version Config 清理遵循相同的 Row 保留规则：
+  任一失败都表示删除尚未完成，并保留 Resource/Version Row 和 Descriptor 供重试。普通被引用
+  Service 和 Client 自有 Runtime 状态不属于类型自有清理目标。
 
 ## 7. Trace 与计数
 

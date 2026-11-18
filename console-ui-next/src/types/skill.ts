@@ -10,6 +10,7 @@ export interface SkillListItem {
   namespaceId: string;
   name: string;
   description: string;
+  owner: string;
   enable: boolean;
   scope: string; // "PUBLIC" or "PRIVATE"
   bizTags: string; // JSON string: ["tag1","tag2"]
@@ -20,6 +21,7 @@ export interface SkillListItem {
   onlineCnt: number;
   updateTime: number; // epoch millis
   downloadCount: number;
+  writable: boolean;
 }
 
 /** Skill version summary */
@@ -53,6 +55,7 @@ export interface SkillDocument {
 
 /** Skill admin detail */
 export interface SkillAdminDetail {
+  owner: string;
   enable: boolean;
   scope: string; // "PUBLIC" or "PRIVATE"
   bizTags: string; // JSON string: ["tag1","tag2"]
@@ -64,6 +67,7 @@ export interface SkillAdminDetail {
   updateTime: number;
   versions: SkillVersionSummary[];
   downloadCount: number;
+  writable: boolean;
 }
 
 /** List response */
@@ -88,90 +92,39 @@ export interface SkillListParams {
   pageSize?: number;
 }
 
-export type SkillUploadAction =
-  | 'CREATE_DRAFT'
-  | 'OVERWRITE_DRAFT';
-
-export interface SkillUploadPrecheckAction {
-  type: SkillUploadAction;
-  resultVersion: string;
-  description?: string;
-}
-
-export interface SkillUploadPrecheckRequest {
-  namespaceId?: string;
-  skillName: string;
-  description?: string;
-  parsedVersion?: string;
-  versionSource?: string;
-  targetVersion?: string;
-}
+export type SkillUploadPrecheckCode =
+  | 'READY'
+  | 'VERSION_ADJUSTED'
+  | 'DRAFT_EXISTS'
+  | 'REVIEWING_EXISTS'
+  | 'NO_PERMISSION'
+  | 'NOT_A_SKILL'
+  | 'INVALID_SKILL';
 
 export interface SkillUploadPrecheckResult {
   namespaceId: string;
-  skillName: string;
-  description?: string;
-  parsedVersion: string;
-  resolvedVersion: string;
-  versionSource: string;
+  entryPath?: string | null;
+  skillName?: string | null;
+  reason?: string | null;
+  owner?: string | null;
+  maxPublishedVersion?: string | null;
+  parsedVersion?: string | null;
+  targetVersion?: string | null;
   exists: boolean;
-  writable: boolean;
-  versionExists: boolean;
-  draftExists: boolean;
-  reviewingExists: boolean;
   editingVersion?: string | null;
   reviewingVersion?: string | null;
-  status: 'VALID' | 'WARNING' | 'CONFLICT' | 'FORBIDDEN';
-  conflictTypes: string[];
-  warnings: string[];
-  errors: string[];
-  actions: SkillUploadPrecheckAction[];
+  precheckCode: SkillUploadPrecheckCode;
 }
 
 // ===== Pipeline Types =====
 
-export type PipelineExecutionStatus = 'IN_PROGRESS' | 'APPROVED' | 'REJECTED';
-
-/** Per-criterion audit checkpoint from a pipeline plugin. */
-export interface PipelineCheckpoint {
-  title: string;
-  passed: boolean;
-}
-
-/** Single pipeline node execution result */
-export interface PipelineNode {
-  nodeId: string;
-  executedAt?: string; // ISO 8601
-  passed: boolean;
-  message?: string;
-  /** Semantic type of message: text | json | markdown | html */
-  messageType?: string;
-  /** Per-criterion audit outcomes from the pipeline plugin */
-  checkpoints?: PipelineCheckpoint[];
-  durationMs?: number;
-}
-
-/** Pipeline execution info stored in publishPipelineInfo JSON */
-export interface PublishPipelineInfo {
-  executionId: string;
-  status: PipelineExecutionStatus;
-  pipeline: PipelineNode[];
-  historical?: boolean;
-}
-
-/** Safely parse publishPipelineInfo JSON string */
-export function parsePipelineInfo(raw: string | null | undefined): PublishPipelineInfo | null {
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed.executionId === 'string' && typeof parsed.status === 'string') {
-      return parsed as PublishPipelineInfo;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
+export { parsePipelineInfo } from './pipeline';
+export type {
+  PipelineCheckpoint,
+  PipelineExecutionStatus,
+  PipelineNode,
+  PublishPipelineInfo,
+} from './pipeline';
 
 /** Safely parse bizTags JSON string */
 export function parseBizTags(raw: string | null | undefined): string[] {

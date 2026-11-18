@@ -29,6 +29,7 @@ import com.alibaba.nacos.naming.core.v2.client.ClientAttributes;
 import com.alibaba.nacos.naming.core.v2.client.ClientSyncData;
 import com.alibaba.nacos.naming.core.v2.client.ClientSyncDatumSnapshot;
 import com.alibaba.nacos.naming.core.v2.client.impl.ConnectionBasedClient;
+import com.alibaba.nacos.naming.core.v2.client.impl.HttpConnectionBasedClient;
 import com.alibaba.nacos.naming.core.v2.client.impl.IpPortBasedClient;
 import com.alibaba.nacos.naming.core.v2.client.manager.ClientManager;
 import com.alibaba.nacos.naming.core.v2.event.client.ClientEvent;
@@ -42,6 +43,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -258,6 +260,21 @@ class DistroClientDataProcessorTest {
     }
     
     @Test
+    void testProcessDataForHttpConnectionBasedClient() {
+        String httpClientId = "HTTP_CLIENT@@client";
+        client = new HttpConnectionBasedClient(httpClientId, clientSyncData.getAttributes());
+        clientSyncData.setClientId(httpClientId);
+        when(clientManager.getClient(httpClientId)).thenReturn(client);
+        distroData.setType(DataOperation.CHANGE);
+        
+        assertTrue(distroClientDataProcessor.processData(distroData));
+        
+        verify(clientManager).syncClientConnected(httpClientId, clientSyncData.getAttributes());
+        assertEquals(1L, client.getRevision());
+        assertEquals(1, client.getAllPublishedService().size());
+    }
+    
+    @Test
     void testProcessDataRemovesStaleService() {
         Service staleService =
             ServiceManager.getInstance().getSingleton(Service.newService("ns", "group",
@@ -419,6 +436,28 @@ class DistroClientDataProcessorTest {
         DistroData actual = distroClientDataProcessor.getDatumSnapshot();
         assertEquals(DataOperation.SNAPSHOT.name(), actual.getDistroKey().getResourceKey());
         assertEquals(DistroClientDataProcessor.TYPE, actual.getDistroKey().getResourceType());
+        // connection based client should be excluded from snapshot
+        ArgumentCaptor<ClientSyncDatumSnapshot> captor =
+            ArgumentCaptor.forClass(ClientSyncDatumSnapshot.class);
+        verify(serializer).serialize(captor.capture());
+        assertTrue(captor.getValue().getClientSyncDataList().isEmpty());
+    }
+    
+    @Test
+    void testGetDatumSnapshotIncludeNonConnectionBasedClient() {
+        Client ipPortClient = new IpPortBasedClient("1.1.1.1:80#true", true);
+        Client httpClient = new HttpConnectionBasedClient("httpClientId", new ClientAttributes());
+        when(clientManager.allClientId())
+            .thenReturn(Arrays.asList("1.1.1.1:80#true", "httpClientId"));
+        when(clientManager.getClient("1.1.1.1:80#true")).thenReturn(ipPortClient);
+        when(clientManager.getClient("httpClientId")).thenReturn(httpClient);
+        
+        distroClientDataProcessor.getDatumSnapshot();
+        
+        ArgumentCaptor<ClientSyncDatumSnapshot> captor =
+            ArgumentCaptor.forClass(ClientSyncDatumSnapshot.class);
+        verify(serializer).serialize(captor.capture());
+        assertEquals(2, captor.getValue().getClientSyncDataList().size());
     }
     
     @Test

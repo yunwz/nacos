@@ -21,7 +21,6 @@ import com.alibaba.nacos.api.ai.model.skills.BatchUploadResult;
 import com.alibaba.nacos.api.ai.model.skills.Skill;
 import com.alibaba.nacos.api.ai.model.skills.SkillMeta;
 import com.alibaba.nacos.api.ai.model.skills.SkillSummary;
-import com.alibaba.nacos.api.ai.model.skills.SkillUploadPrecheckRequest;
 import com.alibaba.nacos.api.ai.model.skills.SkillUploadPrecheckResult;
 import com.alibaba.nacos.api.common.Constants;
 import com.alibaba.nacos.api.exception.NacosException;
@@ -274,7 +273,7 @@ public interface SkillMaintainerService {
      * @return skill name
      * @throws NacosException if fail to upload skill
      */
-    @Since("3.2.3")
+    @Since("3.3.0")
     default String uploadSkillFromZip(String namespaceId, byte[] zipBytes, boolean overwrite,
         String targetVersion, String commitMsg, String uploadAction)
         throws NacosException {
@@ -282,15 +281,29 @@ public interface SkillMaintainerService {
     }
     
     /**
-     * Batch precheck multiple skill uploads.
+     * Precheck one or more skill uploads from a zip file with the default namespace.
      *
-     * @param requests list of precheck requests
-     * @return list of precheck results in the same order as input
+     * @param zipBytes zip file bytes
+     * @return list of precheck results
      * @throws NacosException if precheck failed unexpectedly
      */
-    @Since("3.2.3")
-    default java.util.List<SkillUploadPrecheckResult> batchPrecheckUploadSkill(
-        java.util.List<SkillUploadPrecheckRequest> requests) throws NacosException {
+    @Since("3.3.0")
+    default java.util.List<SkillUploadPrecheckResult> precheckUploadSkillFromZip(byte[] zipBytes)
+        throws NacosException {
+        return precheckUploadSkillFromZip(Constants.DEFAULT_NAMESPACE_ID, zipBytes);
+    }
+    
+    /**
+     * Precheck one or more skill uploads from a zip file.
+     *
+     * @param namespaceId namespace ID
+     * @param zipBytes zip file bytes
+     * @return list of precheck results
+     * @throws NacosException if precheck failed unexpectedly
+     */
+    @Since("3.3.0")
+    default java.util.List<SkillUploadPrecheckResult> precheckUploadSkillFromZip(
+        String namespaceId, byte[] zipBytes) throws NacosException {
         return java.util.Collections.emptyList();
     }
     
@@ -298,7 +311,7 @@ public interface SkillMaintainerService {
      * Batch upload skills from a multi-skill zip archive with default namespace.
      *
      * @param zipBytes zip file bytes containing multiple skill directories
-     * @return batch upload result with succeeded and failed lists
+     * @return batch upload result with per-skill results
      * @throws NacosException if fail to upload
      */
     @Since("3.2.2")
@@ -312,7 +325,7 @@ public interface SkillMaintainerService {
      * @param namespaceId namespace ID
      * @param zipBytes    zip file bytes containing multiple skill directories
      * @param overwrite   whether to overwrite existing drafts
-     * @return batch upload result with succeeded and failed lists
+     * @return batch upload result with per-skill results
      * @throws NacosException if fail to upload
      */
     @Since("3.2.2")

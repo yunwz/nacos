@@ -21,6 +21,8 @@ import com.alibaba.nacos.config.server.model.CacheItem;
 import com.alibaba.nacos.config.server.service.dump.disk.ConfigDiskServiceFactory;
 import com.alibaba.nacos.config.server.service.query.model.ConfigQueryChainRequest;
 import com.alibaba.nacos.config.server.service.query.model.ConfigQueryChainResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 
@@ -31,6 +33,8 @@ import java.io.IOException;
  * @author Nacos
  */
 public class FormalHandler extends AbstractConfigQueryHandler {
+    
+    private static final Logger LOGGER = LoggerFactory.getLogger(FormalHandler.class);
     
     private static final String FORMAL_HANDLER = "formalHandler";
     
@@ -49,8 +53,26 @@ public class FormalHandler extends AbstractConfigQueryHandler {
         
         CacheItem cacheItem = ConfigChainEntryHandler.getThreadLocalCacheItem();
         String md5 = cacheItem.getConfigCache().getMd5();
+        
+        // 304 optimization: compare MD5 from metadata before reading content from disk.
+        // If the client's localMd5 matches, skip content read entirely to reduce I/O overhead.
+        String localMd5 = request.getLocalMd5();
+        if (StringUtils.isNotBlank(localMd5) && localMd5.equals(md5)) {
+            long lastModified = cacheItem.getConfigCache().getLastModifiedTs();
+            String encryptedDataKey = cacheItem.getConfigCache().getEncryptedDataKey();
+            String configType = cacheItem.getType();
+            response.setMd5(md5);
+            response.setLastModified(lastModified);
+            response.setEncryptedDataKey(encryptedDataKey);
+            response.setConfigType(configType);
+            response.setStatus(ConfigQueryChainResponse.ConfigQueryStatus.CONFIG_NOT_MODIFIED);
+            return response;
+        }
+        
         String content = ConfigDiskServiceFactory.getInstance().getContent(dataId, group, tenant);
-        if (StringUtils.isBlank(content)) {
+        if (content == null) {
+            LOGGER.debug("Formal config content not found, dataId={}, group={}, tenant={}", dataId,
+                group, tenant);
             response.setStatus(ConfigQueryChainResponse.ConfigQueryStatus.CONFIG_NOT_FOUND);
             return response;
         }

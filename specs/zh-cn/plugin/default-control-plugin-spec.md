@@ -30,11 +30,12 @@
 通过以下配置启用：
 
 ```properties
-nacos.plugin.control.manager.type=nacos
+nacos.plugin.control.type=nacos
 ```
 
-如果该配置不存在，control manager center 使用无上限 manager。如果 `nacos` builder
-创建任一 manager 失败，该 manager 会回退到无上限实现并记录日志。
+`nacos.plugin.control.manager.type=nacos` 保留为兼容 alias。如果两个配置都不存在，
+control manager center 使用无上限 manager。如果 `nacos` builder 创建任一 manager 失败，
+该 manager 会回退到无上限实现并记录日志。
 
 ## 本地规则文件
 
@@ -57,6 +58,9 @@ nacos.plugin.control.rule.local.basedir=${expectedDir}
 ${expectedDir}/data/connection/limitRule
 ${expectedDir}/data/tps/{pointName}
 ```
+
+`pointName` 必须解析为 `data/tps` 下的单个直接子文件。本地存储会拒绝目录控制名称、路径
+分隔符、绝对路径，以及规范化后逃逸该目录的路径。
 
 连接规则示例：
 

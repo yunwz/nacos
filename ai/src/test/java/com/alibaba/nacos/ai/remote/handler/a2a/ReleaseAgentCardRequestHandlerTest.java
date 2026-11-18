@@ -16,9 +16,8 @@
 
 package com.alibaba.nacos.ai.remote.handler.a2a;
 
-import com.alibaba.nacos.ai.service.a2a.A2aServerOperationService;
+import com.alibaba.nacos.ai.service.a2a.A2aCompatibilityOperationService;
 import com.alibaba.nacos.api.ai.model.a2a.AgentCard;
-import com.alibaba.nacos.api.ai.model.a2a.AgentCardDetailInfo;
 import com.alibaba.nacos.api.ai.remote.request.ReleaseAgentCardRequest;
 import com.alibaba.nacos.api.ai.remote.response.ReleaseAgentCardResponse;
 import com.alibaba.nacos.api.exception.NacosException;
@@ -26,6 +25,7 @@ import com.alibaba.nacos.api.exception.api.NacosApiException;
 import com.alibaba.nacos.api.model.v2.ErrorCode;
 import com.alibaba.nacos.api.remote.request.RequestMeta;
 import com.alibaba.nacos.api.remote.response.ResponseCode;
+import com.alibaba.nacos.api.utils.json.JsonUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -35,19 +35,17 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 @ExtendWith(MockitoExtension.class)
 class ReleaseAgentCardRequestHandlerTest {
     
     @Mock
-    private A2aServerOperationService a2aServerOperationService;
+    private A2aCompatibilityOperationService a2aServerOperationService;
     
     @Mock
     private RequestMeta meta;
@@ -73,6 +71,72 @@ class ReleaseAgentCardRequestHandlerTest {
     }
     
     @Test
+    void rejectsIncompleteRequirementsAfterGenericJsonBinding() throws NacosException {
+        ReleaseAgentCardRequest request = readSecurityRequest(
+            "\"securityRequirements\":[{\"oauth2\":[\"read\"]}]");
+        ReleaseAgentCardResponse response = requestHandler.handle(request, meta);
+        assertEquals(ResponseCode.FAIL.getCode(), response.getResultCode());
+        assertEquals(NacosException.INVALID_PARAM, response.getErrorCode());
+        verifyNoInteractions(a2aServerOperationService);
+    }
+    
+    @Test
+    void rejectsIncompleteSkillRequirementsAfterGenericJsonBinding() throws NacosException {
+        ReleaseAgentCardRequest request = readSecurityRequest(
+            "\"skills\":[{\"id\":\"s\",\"securityRequirements\":[{\"oauth2\":[\"read\"]}]}]");
+        ReleaseAgentCardResponse response = requestHandler.handle(request, meta);
+        assertEquals(ResponseCode.FAIL.getCode(), response.getResultCode());
+        assertEquals(NacosException.INVALID_PARAM, response.getErrorCode());
+        assertTrue(response.getMessage().contains("AgentSkill securityRequirements"));
+        verifyNoInteractions(a2aServerOperationService);
+    }
+    
+    @Test
+    void preservesSkillRequirementsWithoutFillingCardSecurity() throws NacosException {
+        ReleaseAgentCardRequest request = readSecurityRequest(
+            "\"skills\":[{\"id\":\"s\",\"securityRequirements\":[{\"schemes\":{"
+                + "\"oauth2\":{\"list\":[\"skill-read\"]}}}]}]");
+        assertEquals(ResponseCode.SUCCESS.getCode(),
+            requestHandler.handle(request, meta).getResultCode());
+        assertEquals("skill-read", request.getAgentCard().getSkills().get(0)
+            .getSecurityRequirements().get(0).getSchemes().get("oauth2").getList().get(0));
+        assertNull(request.getAgentCard().getSecurityRequirements());
+        assertNull(request.getAgentCard().getSecurity());
+        verify(a2aServerOperationService).releaseAgent(request.getAgentCard(), "public", "SERVICE",
+            false);
+    }
+    
+    @Test
+    void normalizesLegacySecurityAtReleaseBoundary() throws NacosException {
+        ReleaseAgentCardRequest request = readSecurityRequest(
+            "\"security\":[{\"oauth2\":[\"read\"]}]");
+        assertEquals(ResponseCode.SUCCESS.getCode(),
+            requestHandler.handle(request, meta).getResultCode());
+        assertEquals("read", request.getAgentCard().getSecurityRequirements().get(0)
+            .getSchemes().get("oauth2").getList().get(0));
+        verify(a2aServerOperationService).releaseAgent(request.getAgentCard(), "public",
+            "SERVICE", false);
+    }
+    
+    @Test
+    void normalizesStandardRequirementsAtReleaseBoundary() throws NacosException {
+        ReleaseAgentCardRequest request = readSecurityRequest(
+            "\"securityRequirements\":[{\"schemes\":{\"oauth2\":{\"list\":[\"read\"]}}}]");
+        assertEquals(ResponseCode.SUCCESS.getCode(),
+            requestHandler.handle(request, meta).getResultCode());
+        assertEquals("read", request.getAgentCard().getSecurity().get(0).get("oauth2").get(0));
+        verify(a2aServerOperationService).releaseAgent(request.getAgentCard(), "public",
+            "SERVICE", false);
+    }
+    
+    private ReleaseAgentCardRequest readSecurityRequest(String securityJson) {
+        return JsonUtils.toObj("{\"namespaceId\":\"public\",\"agentCard\":{\"name\":\"test\","
+            + "\"version\":\"1.0.0\",\"protocolVersion\":\"0.3.0\","
+            + "\"preferredTransport\":\"JSONRPC\",\"url\":\"https://example.com\","
+            + securityJson + "}}", ReleaseAgentCardRequest.class);
+    }
+    
+    @Test
     void handleWithValidNewAgentCard() throws NacosException {
         final ReleaseAgentCardRequest request = new ReleaseAgentCardRequest();
         AgentCard agentCard = new AgentCard();
@@ -83,14 +147,11 @@ class ReleaseAgentCardRequestHandlerTest {
         agentCard.setUrl("https://example.com");
         request.setAgentCard(agentCard);
         request.setNamespaceId("public");
-        when(meta.getConnectionId()).thenReturn("TEST_CONNECTION_ID");
-        when(a2aServerOperationService.getAgentCard("public", "test", "1.0.0", "")).thenThrow(
-            new NacosApiException(NacosException.NOT_FOUND, ErrorCode.AGENT_NOT_FOUND, ""));
         ReleaseAgentCardResponse response = requestHandler.handle(request, meta);
         assertEquals(ResponseCode.SUCCESS.getCode(), response.getResultCode());
         assertNull(response.getMessage());
-        verify(a2aServerOperationService).registerAgent(any(AgentCard.class), anyString(),
-            anyString());
+        verify(a2aServerOperationService).releaseAgent(eq(agentCard), eq("public"),
+            eq("SERVICE"), eq(false));
     }
     
     @Test
@@ -105,43 +166,11 @@ class ReleaseAgentCardRequestHandlerTest {
         request.setAgentCard(agentCard);
         request.setNamespaceId("public");
         request.setSetAsLatest(true);
-        when(meta.getConnectionId()).thenReturn("TEST_CONNECTION_ID");
-        AgentCardDetailInfo existAgentCard = new AgentCardDetailInfo();
-        existAgentCard.setName("test");
-        existAgentCard.setVersion("0.9.0");
-        when(a2aServerOperationService.getAgentCard("public", "test", "1.0.0", "")).thenThrow(
-            new NacosApiException(NacosException.NOT_FOUND, ErrorCode.AGENT_VERSION_NOT_FOUND, ""));
         ReleaseAgentCardResponse response = requestHandler.handle(request, meta);
         assertEquals(ResponseCode.SUCCESS.getCode(), response.getResultCode());
         assertNull(response.getMessage());
-        verify(a2aServerOperationService).updateAgentCard(any(AgentCard.class), anyString(),
-            anyString(), eq(true));
-    }
-    
-    @Test
-    void handleWithExistingAgentCard() throws NacosException {
-        final ReleaseAgentCardRequest request = new ReleaseAgentCardRequest();
-        AgentCard agentCard = new AgentCard();
-        agentCard.setName("test");
-        agentCard.setVersion("1.0.0");
-        agentCard.setProtocolVersion("0.3.0");
-        agentCard.setPreferredTransport("JSONRPC");
-        agentCard.setUrl("https://example.com");
-        request.setAgentCard(agentCard);
-        request.setNamespaceId("public");
-        when(meta.getConnectionId()).thenReturn("TEST_CONNECTION_ID");
-        AgentCardDetailInfo existAgentCard = new AgentCardDetailInfo();
-        existAgentCard.setName("test");
-        existAgentCard.setVersion("1.0.0");
-        when(a2aServerOperationService.getAgentCard("public", "test", "1.0.0", ""))
-            .thenReturn(existAgentCard);
-        ReleaseAgentCardResponse response = requestHandler.handle(request, meta);
-        assertEquals(ResponseCode.SUCCESS.getCode(), response.getResultCode());
-        verify(a2aServerOperationService, never()).registerAgent(any(AgentCard.class), anyString(),
-            anyString());
-        verify(a2aServerOperationService, never()).updateAgentCard(any(AgentCard.class),
-            anyString(), anyString(),
-            anyBoolean());
+        verify(a2aServerOperationService).releaseAgent(eq(agentCard), eq("public"),
+            eq("SERVICE"), eq(true));
     }
     
     @Test
@@ -155,18 +184,33 @@ class ReleaseAgentCardRequestHandlerTest {
         agentCard.setUrl("https://example.com");
         request.setAgentCard(agentCard);
         request.setNamespaceId("public");
-        when(meta.getConnectionId()).thenReturn("TEST_CONNECTION_ID");
-        when(a2aServerOperationService.getAgentCard("public", "test", "1.0.0", "")).thenThrow(
-            new NacosApiException(NacosException.SERVER_ERROR, ErrorCode.SERVER_ERROR,
-                "test error"));
+        doThrow(new NacosApiException(NacosException.SERVER_ERROR, ErrorCode.SERVER_ERROR,
+            "test error")).when(a2aServerOperationService).releaseAgent(agentCard, "public",
+                "SERVICE", false);
         ReleaseAgentCardResponse response = requestHandler.handle(request, meta);
         assertEquals(ResponseCode.FAIL.getCode(), response.getResultCode());
         assertEquals(NacosException.SERVER_ERROR, response.getErrorCode());
         assertEquals("test error", response.getMessage());
-        verify(a2aServerOperationService, never()).registerAgent(any(AgentCard.class), anyString(),
-            anyString());
-        verify(a2aServerOperationService, never()).updateAgentCard(any(AgentCard.class),
-            anyString(), anyString(),
-            anyBoolean());
+        verify(a2aServerOperationService).releaseAgent(agentCard, "public", "SERVICE", false);
+    }
+    
+    @Test
+    void shouldPreserveMigrationFenceDetailCode() throws NacosException {
+        ReleaseAgentCardRequest request = new ReleaseAgentCardRequest();
+        AgentCard agentCard = new AgentCard();
+        agentCard.setName("test");
+        agentCard.setVersion("1.0.0");
+        agentCard.setProtocolVersion("0.3.0");
+        agentCard.setPreferredTransport("JSONRPC");
+        agentCard.setUrl("https://example.com");
+        request.setAgentCard(agentCard);
+        request.setNamespaceId("public");
+        doThrow(new NacosApiException(NacosException.CONFLICT,
+            ErrorCode.AGENT_MIGRATION_IN_PROGRESS, "retry later"))
+            .when(a2aServerOperationService).releaseAgent(agentCard, "public", "SERVICE", false);
+        ReleaseAgentCardResponse response = requestHandler.handle(request, meta);
+        assertEquals(ResponseCode.FAIL.getCode(), response.getResultCode());
+        assertEquals(ErrorCode.AGENT_MIGRATION_IN_PROGRESS.getCode(), response.getErrorCode());
+        assertEquals("retry later", response.getMessage());
     }
 }

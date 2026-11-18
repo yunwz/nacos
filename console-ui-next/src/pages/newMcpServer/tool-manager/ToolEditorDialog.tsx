@@ -18,6 +18,12 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Separator } from '@/components/ui/separator';
 import SchemaEditor from './SchemaEditor';
 import type { JsonSchema } from './SchemaEditor';
+import {
+  mergeJsonTemplateFields,
+  mergeToolSecurityConfig,
+  parseArgsPosition,
+  readToolSecurityConfig,
+} from './tool-template-utils';
 import type { McpTool, McpToolAnnotations, McpToolMeta } from '@/types/mcp';
 
 interface ToolEditorDialogProps {
@@ -64,7 +70,9 @@ export default function ToolEditorDialog({
 
   // Advanced - templates as JSON text
   const [requestTemplateText, setRequestTemplateText] = useState('');
+  const [argsPositionText, setArgsPositionText] = useState('');
   const [responseTemplateText, setResponseTemplateText] = useState('');
+  const [errorResponseTemplateText, setErrorResponseTemplateText] = useState('');
 
   // Meta
   const [transparentAuth, setTransparentAuth] = useState(false);
@@ -95,20 +103,27 @@ export default function ToolEditorDialog({
       setOpenWorldHint(false);
     }
     if (meta) {
+      const securityConfig = readToolSecurityConfig(meta);
       setEnabled(meta.enabled !== false);
-      setTransparentAuth(meta.transparentAuth || false);
-      setSecuritySchemeId(meta.securitySchemeId || '');
-      setClientSecuritySchemeId(meta.clientSecuritySchemeId || '');
+      setTransparentAuth(securityConfig.transparentAuth);
+      setSecuritySchemeId(securityConfig.securitySchemeId);
+      setClientSecuritySchemeId(securityConfig.clientSecuritySchemeId);
       const tmpl = meta.templates?.['json-go-template'];
       setRequestTemplateText(tmpl?.requestTemplate ? JSON.stringify(tmpl.requestTemplate, null, 2) : '');
+      setArgsPositionText(tmpl?.argsPosition ? JSON.stringify(tmpl.argsPosition, null, 2) : '');
       setResponseTemplateText(tmpl?.responseTemplate ? JSON.stringify(tmpl.responseTemplate, null, 2) : '');
+      setErrorResponseTemplateText(
+        typeof tmpl?.errorResponseTemplate === 'string' ? tmpl.errorResponseTemplate : ''
+      );
     } else {
       setEnabled(true);
       setTransparentAuth(false);
       setSecuritySchemeId('');
       setClientSecuritySchemeId('');
       setRequestTemplateText('');
+      setArgsPositionText('');
       setResponseTemplateText('');
+      setErrorResponseTemplateText('');
     }
   }, [open, tool, meta]);
 
@@ -152,6 +167,13 @@ export default function ToolEditorDialog({
       toast.error(`${t('mcp.requestTemplate')}: ${t('mcp.invalidJson')}`);
       return;
     }
+    const argsPositionResult = parseArgsPosition(argsPositionText);
+    if (!argsPositionResult.ok) {
+      const errorKey =
+        argsPositionResult.reason === 'invalidJson' ? 'mcp.invalidJson' : 'mcp.invalidArgsPosition';
+      toast.error(`${t('mcp.argsPosition')}: ${t(errorKey)}`);
+      return;
+    }
     try {
       if (responseTemplateText.trim()) {
         responseTemplate = JSON.parse(responseTemplateText);
@@ -160,36 +182,37 @@ export default function ToolEditorDialog({
       toast.error(`${t('mcp.responseTemplate')}: ${t('mcp.invalidJson')}`);
       return;
     }
+    const trimmedSecuritySchemeId = securitySchemeId.trim();
+    const trimmedClientSecuritySchemeId = clientSecuritySchemeId.trim();
+    if (transparentAuth && !trimmedSecuritySchemeId) {
+      toast.error(t('mcp.securitySchemeRequired'));
+      return;
+    }
+    if (transparentAuth && !trimmedClientSecuritySchemeId) {
+      toast.error(t('mcp.clientSecuritySchemeRequired'));
+      return;
+    }
 
     const newMeta: McpToolMeta = { ...(meta || {}), enabled };
-    const nextTemplates = { ...(meta?.templates || {}) };
-    const jsonTemplate = { ...(nextTemplates['json-go-template'] || {}) };
-    if (requestTemplate) {
-      jsonTemplate.requestTemplate = requestTemplate;
-    } else {
-      delete jsonTemplate.requestTemplate;
-    }
-    if (responseTemplate) {
-      jsonTemplate.responseTemplate = responseTemplate;
-    } else {
-      delete jsonTemplate.responseTemplate;
-    }
-    if (Object.keys(jsonTemplate).length > 0) {
-      nextTemplates['json-go-template'] = jsonTemplate;
-    } else {
-      delete nextTemplates['json-go-template'];
-    }
-    if (Object.keys(nextTemplates).length > 0) {
-      newMeta.templates = nextTemplates;
+    const nextTemplates = mergeJsonTemplateFields(meta?.templates, {
+      requestTemplate,
+      argsPosition: argsPositionResult.value,
+      responseTemplate,
+      errorResponseTemplate: errorResponseTemplateText,
+    });
+    const nextSecurityTemplates = mergeToolSecurityConfig(nextTemplates, {
+      transparentAuth,
+      securitySchemeId: trimmedSecuritySchemeId,
+      clientSecuritySchemeId: trimmedClientSecuritySchemeId,
+    });
+    if (nextSecurityTemplates) {
+      newMeta.templates = nextSecurityTemplates;
     } else {
       delete newMeta.templates;
     }
-    if (transparentAuth) newMeta.transparentAuth = true;
-    else delete newMeta.transparentAuth;
-    if (securitySchemeId) newMeta.securitySchemeId = securitySchemeId;
-    else delete newMeta.securitySchemeId;
-    if (clientSecuritySchemeId) newMeta.clientSecuritySchemeId = clientSecuritySchemeId;
-    else delete newMeta.clientSecuritySchemeId;
+    delete newMeta.transparentAuth;
+    delete newMeta.securitySchemeId;
+    delete newMeta.clientSecuritySchemeId;
 
     onSave(newTool, newMeta);
     onOpenChange(false);
@@ -257,7 +280,7 @@ export default function ToolEditorDialog({
 
           {/* Output Schema */}
           <TabsContent value="output">
-            <SchemaEditor value={outputSchema} onChange={setOutputSchema} />
+            <SchemaEditor value={outputSchema} onChange={setOutputSchema} allowNullable />
           </TabsContent>
 
           {/* Annotations */}
@@ -329,10 +352,30 @@ export default function ToolEditorDialog({
               />
             </div>
             <div className="space-y-2">
+              <Label>{t('mcp.argsPosition')}</Label>
+              <Textarea
+                value={argsPositionText}
+                onChange={(e) => setArgsPositionText(e.target.value)}
+                placeholder="{}"
+                rows={6}
+                className="font-mono text-xs"
+              />
+            </div>
+            <div className="space-y-2">
               <Label>{t('mcp.responseTemplate')}</Label>
               <Textarea
                 value={responseTemplateText}
                 onChange={(e) => setResponseTemplateText(e.target.value)}
+                placeholder="{}"
+                rows={6}
+                className="font-mono text-xs"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>{t('mcp.errorResponseTemplate')}</Label>
+              <Textarea
+                value={errorResponseTemplateText}
+                onChange={(e) => setErrorResponseTemplateText(e.target.value)}
                 placeholder="{}"
                 rows={6}
                 className="font-mono text-xs"

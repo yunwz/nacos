@@ -17,7 +17,7 @@
 # AI Registry 适配器规范
 
 本文档定义 `ai-registry-adaptor` 模块的契约。该适配器将 Nacos AI Registry
-资源以部分社区注册协议暴露出去，使已有 MCP 和 Skill 客户端可以发现 Nacos 管理的资源，
+资源以部分社区注册协议暴露出去，使已有 MCP、Skill 和 ARD 客户端可以发现 Nacos 管理的资源，
 而不需要直接使用 Nacos v3 API。
 
 ## 1. 范围
@@ -27,6 +27,8 @@ AI Registry 适配器负责协议兼容面。它将 Nacos AI Registry 资源转�
 
 - 通过 MCP Registry v0 兼容只读 API 暴露 MCP Server 数据；
 - 通过 skills CLI 与 well-known discovery 兼容端点暴露 Skill 数据；
+- 通过 Agentic Resource Discovery（ARD）的搜索、探索、目录和 artifact 端点暴露
+  Agent、Skill、Prompt 和 MCP 数据；
 - 这些生态需要的协议特定分页、搜索、响应和文件读取行为。
 
 适配器不负责标准 AI resource identity、生命周期、存储、可见性或发布规则。这些规则仍由
@@ -35,8 +37,9 @@ AI Registry 适配器负责协议兼容面。它将 Nacos AI Registry 资源转�
 
 外部协议参考包括 [MCP Registry](https://modelcontextprotocol.info/tools/registry/)、
 [skills.sh documentation](https://skills.sh/docs) 和
-[Agent Skills Specification](https://agentskills.io/specification)。Nacos 使用这些参考
-实现兼容，不把它们作为自身标准资源模型的归属边界。
+[Agent Skills Specification](https://agentskills.io/specification)，以及
+[ARD Specification](https://agenticresourcediscovery.org/spec/)。Nacos 使用这些参考实现兼容，
+不把它们作为自身标准资源模型的归属边界。
 
 ## 2. 启动与开关
 
@@ -47,11 +50,23 @@ AI Registry 适配器负责协议兼容面。它将 Nacos AI Registry 资源转�
 | --- | --- | --- |
 | `nacos.ai.mcp.registry.enabled` | `false` | 开启 MCP Registry 兼容端点。 |
 | `nacos.ai.skill.registry.enabled` | `false` | 开启 Skill registry 兼容端点。 |
+| `nacos.ai.ard.enabled` | `false` | 只开启 ARD 端点；不拥有基础 AI 资源检索运行时。 |
+| `nacos.ai.resource.search.enabled` | `true` | 在主 AI 模块中开启 RAD、ARD 和资源 API 共用的基础关系检索。 |
 | `nacos.ai.registry.port` | `9080` | 适配器 Context 使用的 HTTP 端口。 |
 | `nacos.ai.mcp.registry.port` | deprecated | 适配器端口的历史兼容配置。 |
 
 用户必须主动开启该能力，因为适配器会额外占用端口，并暴露面向社区客户端的协议形态，
 而不是面向 Nacos Admin、Console 或 Client API 消费者的标准接口。
+
+`nacos.ai.ard.enabled=true` 且 `nacos.ai.resource.search.enabled=false` 时，服务端必须在启动配置
+校验时明确失败，不能创建 ARD 专属索引。关闭 ARD 不影响 RAD 或资源专用
+Search 的索引、任务和 Reconciliation。
+
+关闭 ARD 时不能要求安装 PostgreSQL pgvector。AI 资源检索 document 和 chunk 元数据使用
+主数据源；pgvector 扩展及 `ai_resource_search_embedding_pg` 表只能通过
+`pg-ai-vector-schema.sql` 初始化到用于存储 embedding 的 PostgreSQL 数据源中。
+该数据源既可以是 Nacos PostgreSQL 主数据源，也可以是独立数据源；主
+`pg-schema.sql` 必须在未安装 pgvector 时仍可正常执行。
 
 ## 3. 安全边界
 
@@ -65,7 +80,13 @@ Nacos 鉴权信息。
 - 当部署中包含非公开数据时，运维人员应通过可信网络、网关鉴权、TLS、限流或其他外部
   保护措施暴露适配器；
 - 适配器端点只应暴露适合目标社区协议的数据；
-- 未来如果引入适配器级鉴权，必须兼容外部协议，且不能静默改变 Nacos v3 的标准鉴权语义。
+- ARD 端点在适配器 Web Context 内参与 Nacos Open API 鉴权，同时保留 ARD 专属错误响应。
+
+开启 Nacos 鉴权后，ARD 请求显式携带的凭据必须始终被校验。合法身份会传递到标准可见性
+检查，因此调用方只能发现其有权读取的私有资源；被拒绝的凭据返回 HTTP 401 和
+`UNAUTHENTICATED`。开启 AI 匿名访问时，未携带凭据的请求使用系统保留的匿名身份，且只能
+发现公开资源；否则缺失凭据同样返回 HTTP 401。请求上下文过滤器和鉴权过滤器必须注册在
+独立的适配器 Web Context 中，因为主服务 Web Context 的过滤器不会被同级 Context 继承。
 
 ## 4. MCP Registry 兼容
 
@@ -81,7 +102,11 @@ Nacos 鉴权信息。
 metadata、version、packages、icons、website、repository、tools 和 endpoints 映射到
 registry 响应形态。当 frontend endpoint 和 backend endpoint 同时存在时，优先使用
 frontend endpoint。Endpoint 数据会根据 MCP front protocol 转换为 registry `remotes`，
-例如 streamable HTTP 或 SSE。
+例如 streamable HTTP 或 SSE。未携带 `protocol` 或 `path` 的 endpoint（例如只提供
+address 与 port 的 `DIRECT` endpoint 规格）会将 URL 协议默认为 `http`、路径默认为空，
+从而保证每个 remote URL 都是合法的绝对 URL。`_meta` 中的 `official` 对象通过
+`status` 字段反映 Nacos MCP server 的生命周期状态（`active`、`deprecated` 或
+`deleted`）。
 
 `namespaceId` 是 Nacos 扩展字段。未传入时，适配器可以按确定性的 namespace 顺序跨
 namespace 搜索。这使 Nacos 可以作为内部 MCP subregistry 使用，同时标准 MCP 资源模型仍由
@@ -133,15 +158,25 @@ registry 用法的 Skill discovery 端点：
 标准包与生命周期规则由 [Skill 规范](skill-spec.md)定义。适配器只负责将符合条件的
 Nacos Skills 转换为社区 discovery 形态。
 
-## 6. 兼容规则
+## 6. Agentic Resource Discovery 兼容
+
+适配器为 Nacos 管理的 Agent、Skill、Prompt 和 MCP 资源提供 ARD v0.91 发现能力。
+入口、查询与 context、分页、Registry 信任、制品及支持限制由
+[ARD 协议规范](ard-protocol-spec.md)统一定义。
+
+ARD 复用 [AI 资源检索](ai-resource-search-spec.md)的索引、可见性、当前版本校验和检索运行时。
+适配器负责协议转换，标准资源写入仍通过 Nacos API 和 SDK 完成。
+
+## 7. 兼容规则
 
 - 在适配器路径上，外部协议兼容性优先于 Nacos v3 响应约定。
 - 标准 Nacos API 仍是管理语义的事实来源。
+- ARD 兼容性变更必须同时更新固定的上游 revision、仓库内 fixture、本规范和一致性测试。
 - 社区协议变化很快。当 MCP Registry、skills CLI、skills.sh 或 well-known Skill
   discovery 格式变化时，适配器可能需要不兼容调整。
 - 当上游协议引入不兼容字段、分页、鉴权或路由变化时，兼容行为应明确版本化或文档化。
 
-## 7. 待处理问题
+## 8. 待处理问题
 
 - 为需要暴露兼容协议但又不希望数据公开的运维场景定义稳定的适配器鉴权模型。
 - 跟踪 MCP Registry 版本变化，并明确未来是否支持写 API，还是继续将写操作保持在适配器

@@ -18,10 +18,17 @@ package com.alibaba.nacos.test.adminapi.ai.a2a;
 
 import com.alibaba.nacos.api.model.v2.ErrorCode;
 import com.alibaba.nacos.common.http.param.Query;
+import com.alibaba.nacos.common.utils.JacksonUtils;
 import com.alibaba.nacos.test.adminapi.ai.AiAdminApiBaseITCase;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
@@ -35,7 +42,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Scenario coverage:
  * <ul>
  *     <li>Expected capability: legacy and v1 agent cards can be registered, normalized, queried by version/latest,
- *     updated to a new latest version, listed by blur search, and enumerated by version.</li>
+ *     updated to a new latest version, listed by blur search, and enumerated by version; legacy A2A and canonical
+ *     Agent Admin APIs read and mutate the same Agent definition.</li>
  *     <li>Boundary/validation: namespace defaults to public; register defaults registrationType to URL; update allows
  *     omitted registrationType; invalid search, missing agentName, invalid registrationType, empty card, malformed
  *     JSON, and incomplete legacy/v1 endpoint definitions are rejected with HTTP 400.</li>
@@ -50,6 +58,123 @@ public class A2aAdminApiOpenApiITCase extends AiAdminApiBaseITCase {
     private static final String REGISTRATION_TYPE_URL = "URL";
     
     private static final String SEARCH_BLUR = "blur";
+
+    @ParameterizedTest
+    @ValueSource(strings = {"standard", "empty", "absent", "null"})
+    void testSkillSecurityRequirementsRegisterAndQuery(String scenario) throws Exception {
+        String name = "openapi-skill-security-" + UUID.randomUUID();
+        String version = "1.0.0";
+        ObjectNode card = (ObjectNode) JacksonUtils.toObj(buildV1AgentCard(name, version, "1.0"));
+        JsonNode cardRequirements = JacksonUtils.toObj("[{\"schemes\":{\"cardOnly\":{\"list\":[\"card-read\"]}}}]");
+        card.set("securityRequirements", cardRequirements);
+        ObjectNode skill = (ObjectNode) JacksonUtils.toObj("{\"id\":\"protected\",\"name\":\"Protected\","
+            + "\"description\":\"Skill requirements\",\"tags\":[]}");
+        if (!"absent".equals(scenario)) {
+            String requirements = "standard".equals(scenario)
+                ? "[{\"schemes\":{\"skillOauth\":{\"list\":[\"skill-read\",\"profile\"]},"
+                    + "\"apiKey\":{\"list\":[]}}},{\"schemes\":{\"bearer\":{\"list\":[]}}}]"
+                : "empty".equals(scenario) ? "[]" : "null";
+            skill.set("securityRequirements", JacksonUtils.toObj(requirements));
+        }
+        card.putArray("skills").add(skill);
+        try {
+            assertEquals(ErrorCode.SUCCESS.getCode(),
+                registerAgent(name, version, REGISTRATION_TYPE_URL, card.toString()).get("code").asInt());
+            JsonNode result = getAgentCard(name, version, REGISTRATION_TYPE_URL).get("data");
+            JsonNode actual = result.path("skills").get(0).path("securityRequirements");
+            if ("absent".equals(scenario) || "null".equals(scenario)) {
+                assertTrue(actual.isMissingNode() || actual.isNull());
+            } else {
+                assertEquals(skill.get("securityRequirements"), actual);
+            }
+            assertEquals(cardRequirements, result.get("securityRequirements"));
+        } finally {
+            deleteAgentQuietly(name, version, REGISTRATION_TYPE_URL);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"[{}]", "[null]", "[{\"oauth2\":[\"read\"]}]",
+        "[{\"schemes\":{\"oauth2\":{\"list\":null}}}]"})
+    void testMalformedSkillSecurityRequirementsReturnBadRequest(String requirements) throws Exception {
+        String name = "openapi-skill-invalid-" + UUID.randomUUID();
+        String version = "1.0.0";
+        ObjectNode card = (ObjectNode) JacksonUtils.toObj(buildV1AgentCard(name, version, "1.0"));
+        card.set("skills", JacksonUtils.toObj("[{\"id\":\"s\",\"name\":\"Skill\",\"tags\":[],"
+            + "\"securityRequirements\":" + requirements + "}]"));
+        try {
+            assertBadRequestContains(buildAgentCardForm(name, version, REGISTRATION_TYPE_URL, card.toString()),
+                "Can't be parsed");
+        } finally {
+            deleteAgentQuietly(name, version, REGISTRATION_TYPE_URL);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"standard", "flat", "legacy", "both", "empty", "anonymous", "absent"})
+    void testSecurityRequirementsRegisterAndQuery(String scenario) throws Exception {
+        String name = "openapi-security-" + UUID.randomUUID();
+        String version = "1.0.0";
+        ObjectNode card = (ObjectNode) JacksonUtils.toObj(buildV1AgentCard(name, version,
+            "legacy".equals(scenario) ? "0.3" : "1.0"));
+        String standard = "[{\"schemes\":{\"apiKey\":{\"list\":[]},"
+            + "\"oauth2\":{\"list\":[\"read\",\"profile\"]}}},{\"schemes\":{\"bearer\":{\"list\":[]}}}]";
+        String flat = "[{\"apiKey\":[],\"oauth2\":[\"read\",\"profile\"]},{\"bearer\":[]}]";
+        if ("absent".equals(scenario)) {
+            standard = "null";
+            flat = "null";
+        } else if ("legacy".equals(scenario)) {
+            card.set("security", JacksonUtils.toObj(flat));
+        } else {
+            if ("both".equals(scenario) || "empty".equals(scenario) || "anonymous".equals(scenario)) {
+                card.set("security", JacksonUtils.toObj("[{\"obsolete\":[\"old-scope\"]}]"));
+            }
+            if ("empty".equals(scenario)) {
+                standard = "[]";
+                flat = "[]";
+            } else if ("anonymous".equals(scenario)) {
+                standard = "[{\"schemes\":{}}]";
+                flat = "[{}]";
+            }
+            card.set("securityRequirements", JacksonUtils.toObj("flat".equals(scenario) ? flat : standard));
+        }
+        try {
+            JsonNode registered = registerAgent(name, version, REGISTRATION_TYPE_URL, card.toString());
+            assertEquals(ErrorCode.SUCCESS.getCode(), registered.get("code").asInt());
+            JsonNode result = getAgentCard(name, version, REGISTRATION_TYPE_URL).get("data");
+            if ("absent".equals(scenario)) {
+                assertTrue(result.path("securityRequirements").isMissingNode()
+                    || result.path("securityRequirements").isNull());
+                assertTrue(result.path("security").isMissingNode() || result.path("security").isNull());
+            } else {
+                assertEquals(JacksonUtils.toObj(standard), result.get("securityRequirements"));
+                assertEquals(JacksonUtils.toObj(flat), result.get("security"));
+            }
+        } finally {
+            deleteAgentQuietly(name, version, REGISTRATION_TYPE_URL);
+        }
+    }
+
+    @Test
+    void testMalformedSecurityRequirementsReturnBadRequest() throws Exception {
+        String name = "openapi-security-invalid-" + UUID.randomUUID();
+        String version = "1.0.0";
+        ObjectNode card = (ObjectNode) JacksonUtils.toObj(buildV1AgentCard(name, version, "1.0"));
+        card.set("securityRequirements", JacksonUtils.toObj("[{\"schemes\":{\"apiKey\":42}}]"));
+        assertBadRequestContains(buildAgentCardForm(name, version, REGISTRATION_TYPE_URL, card.toString()),
+            "Can't be parsed");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"[null]", "[{\"oauth2\":null}]"})
+    void testMalformedLegacySecurityReturnBadRequest(String security) throws Exception {
+        String name = "openapi-security-invalid-" + UUID.randomUUID();
+        String version = "1.0.0";
+        ObjectNode card = (ObjectNode) JacksonUtils.toObj(buildV1AgentCard(name, version, "0.3"));
+        card.set("security", JacksonUtils.toObj(security));
+        assertBadRequestContains(buildAgentCardForm(name, version, REGISTRATION_TYPE_URL, card.toString()),
+            "Can't be parsed");
+    }
     
     @Test
     public void testRegisterLegacyAgentCardAndGetAgentCardSuccess() throws Exception {
@@ -144,6 +269,108 @@ public class A2aAdminApiOpenApiITCase extends AiAdminApiBaseITCase {
         } finally {
             deleteAgentQuietly(agentName, v1, REGISTRATION_TYPE_URL);
             deleteAgentQuietly(agentName, v2, REGISTRATION_TYPE_URL);
+        }
+    }
+
+    @Test
+    public void testLegacyAndCanonicalAgentApisShareOneDefinition() throws Exception {
+        String legacyAgentName = "openapi-cross-legacy-" + UUID.randomUUID();
+        String firstVersion = "1.0.0";
+        String secondVersion = "2.0.0";
+        try {
+            JsonNode registered = registerAgent(legacyAgentName, firstVersion,
+                    REGISTRATION_TYPE_URL,
+                    buildV1AgentCard(legacyAgentName, firstVersion, "1.0"));
+            assertEquals(ErrorCode.SUCCESS.getCode(), registered.get("code").asInt(),
+                    registered.toString());
+
+            JsonNode canonicalOverview = getJsonOk(ADMIN_AGENT_PATH,
+                    agentIdentityQuery(null, legacyAgentName)).get("data");
+            JsonNode canonicalAgent = canonicalOverview.get("agent");
+            assertEquals(legacyAgentName, canonicalAgent.get("agentName").asText(),
+                    canonicalOverview.toString());
+            assertEquals("enable", canonicalAgent.get("status").asText(),
+                    canonicalOverview.toString());
+            assertEquals("PUBLIC", canonicalAgent.get("scope").asText(),
+                    canonicalOverview.toString());
+            assertEquals(1, canonicalAgent.get("versionInfo").get("onlineVersions").size(),
+                    canonicalOverview.toString());
+            assertEquals(firstVersion,
+                    canonicalAgent.get("versionInfo").get("labels").get("latest").asText(),
+                    canonicalOverview.toString());
+
+            JsonNode canonicalVersion = getJsonOk(ADMIN_AGENT_VERSION_PATH,
+                    agentVersionIdentityQuery(null, legacyAgentName, firstVersion)).get("data");
+            assertEquals("online", canonicalVersion.get("status").asText(),
+                    canonicalVersion.toString());
+            assertEquals("a2a",
+                    canonicalVersion.get("callInterfaces").get(0).get("protocol").asText(),
+                    canonicalVersion.toString());
+            assertEquals(2,
+                    canonicalVersion.get("callInterfaces").get(0).get("endpointSets").get(0).get("endpoints").size(),
+                    canonicalVersion.toString());
+
+            JsonNode updated = updateAgentCard(legacyAgentName, secondVersion,
+                    REGISTRATION_TYPE_URL,
+                    buildV1AgentCard(legacyAgentName, secondVersion, "1.0"), true);
+            assertEquals(ErrorCode.SUCCESS.getCode(), updated.get("code").asInt(),
+                    updated.toString());
+            JsonNode secondCanonicalVersion = getJsonOk(ADMIN_AGENT_VERSION_PATH,
+                    agentVersionIdentityQuery(null, legacyAgentName, secondVersion)).get("data");
+            assertEquals("online", secondCanonicalVersion.get("status").asText(),
+                    secondCanonicalVersion.toString());
+
+            JsonNode promoteFirst = updateAgentCard(legacyAgentName, firstVersion,
+                    REGISTRATION_TYPE_URL,
+                    buildV1AgentCard(legacyAgentName, firstVersion, "1.0"), true);
+            assertEquals(ErrorCode.SUCCESS.getCode(), promoteFirst.get("code").asInt(),
+                    promoteFirst.toString());
+            assertEquals(firstVersion,
+                    getAgentCard(legacyAgentName, null, REGISTRATION_TYPE_URL).get("data")
+                            .get("version").asText());
+
+            Map<String, Object> changedCard = JacksonUtils.toObj(
+                    buildV1AgentCard(legacyAgentName, firstVersion, "1.0"), Map.class);
+            changedCard.put("description", "conflicting online AgentCard content");
+            Map<String, String> conflictingUpdate = buildAgentCardForm(legacyAgentName,
+                    firstVersion, REGISTRATION_TYPE_URL, JacksonUtils.toJson(changedCard));
+            conflictingUpdate.put("setAsLatest", "true");
+            assertError(putFormRaw(ADMIN_A2A_PATH, conflictingUpdate), 409,
+                    ErrorCode.RESOURCE_CONFLICT, "content already exists");
+
+            deleteJsonOk(ADMIN_A2A_PATH,
+                    agentVersionIdentityQuery(null, legacyAgentName, firstVersion));
+            assertError(getRaw(ADMIN_AGENT_VERSION_PATH,
+                    agentVersionIdentityQuery(null, legacyAgentName, firstVersion)), 404,
+                    ErrorCode.RESOURCE_NOT_FOUND, "Agent Version not found");
+            assertEquals(secondVersion,
+                    getAgentCard(legacyAgentName, null, REGISTRATION_TYPE_URL).get("data")
+                            .get("version").asText());
+        } finally {
+            deleteAgentDefinitionQuietly(DEFAULT_NAMESPACE, legacyAgentName);
+        }
+
+        String canonicalAgentName = "openapi-cross-canonical-" + UUID.randomUUID();
+        String version = "3.0.0";
+        try {
+            JsonNode draft = postFormOk(ADMIN_AGENT_PATH + "/draft",
+                    agentForm(legacyCompatibleInitialDraft(canonicalAgentName, version)))
+                    .get("data");
+            assertEquals("draft", draft.get("status").asText(), draft.toString());
+            JsonNode online = postFormOk(ADMIN_AGENT_PATH + "/force-publish",
+                    agentForm(agentVersionCommand(null, canonicalAgentName, version))).get("data");
+            assertEquals("online", online.get("status").asText(), online.toString());
+
+            JsonNode legacyProjection = getAgentCard(canonicalAgentName, version,
+                    REGISTRATION_TYPE_URL).get("data");
+            assertEquals(canonicalAgentName, legacyProjection.get("name").asText(),
+                    legacyProjection.toString());
+            assertEquals(version, legacyProjection.get("version").asText(),
+                    legacyProjection.toString());
+            assertEquals(2, legacyProjection.get("supportedInterfaces").size(),
+                    legacyProjection.toString());
+        } finally {
+            deleteAgentDefinitionQuietly(DEFAULT_NAMESPACE, canonicalAgentName);
         }
     }
     
@@ -256,6 +483,34 @@ public class A2aAdminApiOpenApiITCase extends AiAdminApiBaseITCase {
                 .addParam("search", search).addParam("pageNo", String.valueOf(pageNo))
                 .addParam("pageSize", String.valueOf(pageSize));
         return getJsonOk(ADMIN_A2A_LIST_PATH, query);
+    }
+
+    private Map<String, Object> legacyCompatibleInitialDraft(String agentName, String version) {
+        Map<String, Object> result = agentInitialDraftRequest(null, agentName, version);
+        Map<String, Object> callInterface = new LinkedHashMap<>();
+        callInterface.put("protocol", "a2a");
+        callInterface.put("protocolVersion", "1.0");
+        callInterface.put("descriptorMediaType", "application/json");
+        callInterface.put("nativeDescriptor",
+                JacksonUtils.toObj(buildV1AgentCard(agentName, version, "1.0"), Map.class));
+        callInterface.put("endpointSourceOrder", Arrays.asList("DECLARED", "RUNTIME"));
+
+        Map<String, Object> declaredSet1 = new LinkedHashMap<>();
+        declaredSet1.put("source", "DECLARED");
+        declaredSet1.put("endpoints", Arrays.asList(
+                declaredEndpoint(agentName, "jsonrpc", "JSONRPC"),
+                declaredEndpoint(agentName, "grpc", "GRPC")));
+        callInterface.put("endpointSets", java.util.Collections.singletonList(declaredSet1));
+        result.put("callInterfaces", Collections.singletonList(callInterface));
+        return result;
+    }
+
+    private Map<String, Object> declaredEndpoint(String agentName, String path,
+            String transport) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("uri", "https://example.com/" + agentName + '/' + path);
+        result.put("transport", transport);
+        return result;
     }
     
     private void assertBadRequestContains(Map<String, String> form, String expectedText) throws Exception {

@@ -16,19 +16,18 @@
 
 package com.alibaba.nacos.persistence.datasource;
 
-import com.alibaba.nacos.common.utils.CollectionUtils;
 import com.alibaba.nacos.common.utils.Preconditions;
 import com.alibaba.nacos.common.utils.StringUtils;
+import com.alibaba.nacos.plugin.datasource.dialect.DatabaseDialect;
+import com.alibaba.nacos.plugin.datasource.manager.DatabaseDialectManager;
 import com.zaxxer.hikari.HikariDataSource;
-import org.springframework.boot.context.properties.bind.Bindable;
-import org.springframework.boot.context.properties.bind.Binder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.env.Environment;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-
-import static com.alibaba.nacos.common.utils.CollectionUtils.getOrDefault;
 
 /**
  * Properties of external DataSource.
@@ -37,59 +36,54 @@ import static com.alibaba.nacos.common.utils.CollectionUtils.getOrDefault;
  */
 public class ExternalDataSourceProperties {
     
+    private static final Logger LOGGER =
+        LoggerFactory.getLogger(ExternalDataSourceProperties.class);
+    
+    /**
+     * Compatibility default driver, used only when neither the pool config nor the selected
+     * dialect plugin provides a driver class name.
+     */
     private static final String JDBC_DRIVER_NAME = "com.mysql.cj.jdbc.Driver";
     
     private static final String TEST_QUERY = "SELECT 1";
     
-    private Integer num;
-    
-    private List<String> url = new ArrayList<>();
-    
-    private List<String> user = new ArrayList<>();
-    
-    private List<String> password = new ArrayList<>();
-    
-    public void setNum(Integer num) {
-        this.num = num;
-    }
-    
-    public void setUrl(List<String> url) {
-        this.url = url;
-    }
-    
-    public void setUser(List<String> user) {
-        this.user = user;
-    }
-    
-    public void setPassword(List<String> password) {
-        this.password = password;
-    }
-    
     /**
      * Build serveral HikariDataSource.
      *
-     * @param environment {@link Environment}
-     * @param callback    Callback function when constructing data source
+     * @param environment    {@link Environment}
+     * @param dataSourceType datasource type resolved during service initialization
+     * @param callback       Callback function when constructing data source
      * @return List of {@link HikariDataSource}
      */
-    List<HikariDataSource> build(Environment environment, Callback<HikariDataSource> callback) {
+    List<HikariDataSource> build(Environment environment, String dataSourceType,
+        Callback<HikariDataSource> callback) {
         List<HikariDataSource> dataSources = new ArrayList<>();
-        Binder.get(environment).bind("db", Bindable.ofInstance(this));
-        Preconditions.checkArgument(Objects.nonNull(num), "db.num is null");
-        Preconditions.checkArgument(CollectionUtils.isNotEmpty(user),
-            "db.user or db.user.[index] is null");
-        Preconditions.checkArgument(CollectionUtils.isNotEmpty(password),
-            "db.password or db.password.[index] is null");
+        DatasourceConfigResolver configResolver = new DatasourceConfigResolver(environment);
+        Integer num = configResolver.resolve("num", Integer.class);
+        Preconditions.checkArgument(Objects.nonNull(num),
+            "nacos.plugin.datasource.db.num (legacy db.num) is null");
+        String defaultUser = configResolver.resolveIndexed("user", 0, true);
+        Preconditions.checkArgument(Objects.nonNull(defaultUser),
+            "nacos.plugin.datasource.db.user[.index] (legacy db.user[.index]) is null");
+        String defaultPassword = configResolver.resolveIndexed("password", 0, true);
+        Preconditions.checkArgument(Objects.nonNull(defaultPassword),
+            "nacos.plugin.datasource.db.password[.index] "
+                + "(legacy db.password[.index]) is null");
         for (int index = 0; index < num; index++) {
-            int currentSize = index + 1;
-            Preconditions.checkArgument(url.size() >= currentSize, "db.url.%s is null", index);
-            DataSourcePoolProperties poolProperties = DataSourcePoolProperties.build(environment);
+            String url = configResolver.resolveIndexed("url", index, false);
+            Preconditions.checkArgument(Objects.nonNull(url),
+                "nacos.plugin.datasource.db.url.%s (legacy db.url.%s) is null", index,
+                index);
+            String user = configResolver.resolveIndexed("user", index, true);
+            String password = configResolver.resolveIndexed("password", index, true);
+            DataSourcePoolProperties poolProperties =
+                DataSourcePoolProperties.build(configResolver);
             if (StringUtils.isEmpty(poolProperties.getDataSource().getDriverClassName())) {
-                poolProperties.setDriverClassName(JDBC_DRIVER_NAME);
+                poolProperties.setDriverClassName(resolveDefaultDriverClassName(dataSourceType));
             }
-            poolProperties.setJdbcUrl(url.get(index).trim());
-            poolProperties.setUsername(getOrDefault(user, index, user.get(0)).trim());
-            poolProperties.setPassword(getOrDefault(password, index, password.get(0)).trim());
+            poolProperties.setJdbcUrl(url.trim());
+            poolProperties.setUsername(user.trim());
+            poolProperties.setPassword(password.trim());
             HikariDataSource ds = poolProperties.getDataSource();
             if (StringUtils.isEmpty(ds.getConnectionTestQuery())) {
                 ds.setConnectionTestQuery(TEST_QUERY);
@@ -98,9 +92,39 @@ public class ExternalDataSourceProperties {
             dataSources.add(ds);
             callback.accept(ds);
         }
-        Preconditions.checkArgument(CollectionUtils.isNotEmpty(dataSources),
-            "no datasource available");
+        Preconditions.checkArgument(!dataSources.isEmpty(), "no datasource available");
         return dataSources;
+    }
+    
+    /**
+     * Resolve the driver class used when {@code pool.config.driver-class-name} is blank.
+     *
+     * <p>The selected {@link DatabaseDialect} plugin is asked first, so that selecting a dialect via
+     * {@code nacos.plugin.datasource-dialect.type} is enough for the built-in datasource plugins.
+     * When the dialect cannot be resolved or does not provide a default driver, the MySQL
+     * compatibility default is kept.
+     *
+     * @param dialectType datasource type resolved during service initialization
+     * @return default JDBC driver class name, never blank
+     */
+    String resolveDefaultDriverClassName(String dialectType) {
+        String driverClassName = null;
+        try {
+            DatabaseDialect dialect = DatabaseDialectManager.getInstance().getDialect(dialectType);
+            driverClassName = dialect.getDefaultDriverClassName();
+        } catch (IllegalStateException e) {
+            LOGGER.warn("[ExternalDataSourceProperties] Cannot resolve DatabaseDialect `{}` "
+                + "for default driver class name: {}", dialectType, e.getMessage());
+        }
+        if (StringUtils.isBlank(driverClassName)) {
+            LOGGER.info("[ExternalDataSourceProperties] DatabaseDialect `{}` provides no default "
+                + "driver class name, fallback to compatibility default `{}`", dialectType,
+                JDBC_DRIVER_NAME);
+            return JDBC_DRIVER_NAME;
+        }
+        LOGGER.info("[ExternalDataSourceProperties] Use default driver class name `{}` "
+            + "provided by DatabaseDialect `{}`", driverClassName, dialectType);
+        return driverClassName.trim();
     }
     
     interface Callback<D> {

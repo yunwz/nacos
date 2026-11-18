@@ -68,4 +68,38 @@ class DataSourcePoolPropertiesTest {
         assertEquals(MAX_POOL_SIZE.intValue(), actual.getMaximumPoolSize());
         assertEquals(DataSourcePoolProperties.DEFAULT_MINIMUM_IDLE, actual.getMinimumIdle());
     }
+    
+    @Test
+    void testBuildWithCanonicalConfigOverride() {
+        environment.setProperty(
+            "nacos.plugin.datasource.db.pool.config.connection-timeout", "20000");
+        DataSourcePoolProperties poolProperties = DataSourcePoolProperties.build(environment);
+        HikariDataSource actual = poolProperties.getDataSource();
+        assertEquals(20000L, actual.getConnectionTimeout());
+        assertEquals(MAX_POOL_SIZE.intValue(), actual.getMaximumPoolSize());
+    }
+    
+    @Test
+    void testBuildWithExternalDefault() {
+        DataSourcePoolProperties poolProperties =
+            DataSourcePoolProperties.build(new MockEnvironment());
+        assertEquals(DataSourcePoolProperties.DEFAULT_CONNECTION_TIMEOUT,
+            poolProperties.getDataSource().getConnectionTimeout());
+    }
+    
+    @Test
+    void testBuildWithEmbeddedDefault() {
+        DataSourcePoolProperties poolProperties = DataSourcePoolProperties.build(
+            new MockEnvironment(), DataSourcePoolProperties.DEFAULT_EMBEDDED_CONNECTION_TIMEOUT);
+        assertEquals(DataSourcePoolProperties.DEFAULT_EMBEDDED_CONNECTION_TIMEOUT,
+            poolProperties.getDataSource().getConnectionTimeout());
+    }
+    
+    @Test
+    void testBuildWithEmbeddedDefaultAndConfigOverride() {
+        DataSourcePoolProperties poolProperties = DataSourcePoolProperties.build(environment,
+            DataSourcePoolProperties.DEFAULT_EMBEDDED_CONNECTION_TIMEOUT);
+        assertEquals(CONNECTION_TIMEOUT.longValue(),
+            poolProperties.getDataSource().getConnectionTimeout());
+    }
 }

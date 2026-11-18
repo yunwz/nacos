@@ -16,13 +16,11 @@
 
 package com.alibaba.nacos.naming.utils;
 
-import com.alibaba.nacos.api.common.Constants;
-import com.alibaba.nacos.common.utils.MD5Utils;
 import com.alibaba.nacos.naming.core.v2.client.Client;
 import com.alibaba.nacos.naming.core.v2.client.impl.IpPortBasedClient;
 import com.alibaba.nacos.naming.core.v2.pojo.InstancePublishInfo;
 import com.alibaba.nacos.naming.core.v2.pojo.Service;
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -96,17 +94,6 @@ public class DistroUtils {
                         ip.getExtendDatum());
                 })
                 .collect(Collectors.toSet()));
-    }
-    
-    /**
-     * Calculate checksum for client.
-     */
-    public static String checksum(Client client) {
-        String s = buildUniqueString(client);
-        if (s == null) {
-            return "0";
-        }
-        return MD5Utils.md5Hex(s, Constants.ENCODE);
     }
     
     /**

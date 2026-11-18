@@ -39,4 +39,20 @@ class ServerAbilitiesTest {
     void testSupportAgentCardV1Abilities() {
         assertTrue(ServerAbilities.getStaticAbilities().get(AbilityKey.SERVER_AGENT_CARD_V1));
     }
+    
+    @Test
+    void testSupportRadV1Ability() {
+        assertTrue(ServerAbilities.getStaticAbilities().get(AbilityKey.SERVER_RAD_V1));
+    }
+    
+    @Test
+    void testSupportRadWatchV1Ability() {
+        assertTrue(ServerAbilities.getStaticAbilities().get(AbilityKey.SERVER_RAD_WATCH_V1));
+    }
+    
+    @Test
+    void testSupportMcpDraftReleaseAbility() {
+        assertTrue(ServerAbilities.getStaticAbilities()
+            .get(AbilityKey.SERVER_MCP_DRAFT_RELEASE));
+    }
 }

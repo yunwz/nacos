@@ -121,6 +121,17 @@ Nacos 将请求级授权和数据级可见性分开处理。
 | `tags` | 复制到 `Resource.properties` 的附加元数据。 |
 | `apiType` | API 受众与鉴权范围。 |
 
+资源解析遵循以下优先级：
+
+1. `resource` 非空时，直接转换为 `SPECIFIED` 资源。
+2. 方法级 `parser` 不是默认 Parser 时，由其解析请求，并保留注解声明的
+   `signType` 和 `apiType`。
+3. 否则根据 `signType` 选择协议对应的类型化 Parser。
+4. 找不到类型化 Parser 时，由 `DefaultResourceParser` 返回空资源。
+
+显式指定的 Parser 构造或解析失败时，不得静默降级为空资源。该失败应作为
+请求处理错误，因为继续使用更宽泛的资源可能削弱鉴权约束。
+
 每个非公开的 v3 HTTP API 和 gRPC 请求处理器都必须声明预期的鉴权元数据。公开端点必须由
 所属规范明确记录。
 
@@ -136,6 +147,10 @@ Nacos 将请求级授权和数据级可见性分开处理。
 6. 针对 `Permission(resource, action)` 校验权限。
 
 服务端内部请求在继续处理前，还可能要求配置的服务端身份 key 和 value 校验通过。
+
+JRaft 原生 gRPC 虽然不使用 Nacos `RequestHandler`，仍属于服务端内部传输。客户端通过 gRPC
+`CallCredentials` 传输 server identity，服务端通过 `ServerInterceptor` 校验。集群进入强制状态后，
+关闭公开 Open API 鉴权不得绕过 JRaft server identity。
 
 ## 资源权限名
 
@@ -162,13 +177,21 @@ NamespaceId -> Group 或 resourceType -> resourceName
 
 鉴权启用状态按 API 受众划分：
 
-| 配置 | 范围 |
-|------|------|
-| `nacos.core.auth.enabled` | 启用 Open API 和通用鉴权系统。 |
-| `nacos.core.auth.admin.enabled` | 启用 Admin API 鉴权。 |
-| `nacos.core.auth.console.enabled` | 启用 Console API 和登录行为鉴权。 |
+| 配置 | 范围 | Nacos 3.3 起默认值 |
+|------|------|--------------------|
+| `nacos.core.auth.enabled` | 启用 Open API、Java SDK 与 gRPC 请求鉴权和通用鉴权系统。 | `true` |
+| `nacos.core.auth.admin.enabled` | 启用 Admin API 鉴权。 | `true` |
+| `nacos.core.auth.console.enabled` | 启用 Console API 和登录行为鉴权。 | `true` |
 
-选中的鉴权插件由 `nacos.core.auth.system.type` 指定。
+范围配置缺失时使用表中的默认值。显式配置的 `true` 或 `false` 始终优先于默认值。修改 Client 范围
+不得隐式改变 Admin 或 Console 范围。
+
+Client 范围继续作为可运行时刷新的服务端配置。运维人员可以在分发应用身份期间显式保持关闭，然后在
+不重启服务端的情况下开启。application property reload 是节点本地机制，因此集群切换必须让每个成员
+获得相同的有效值。
+
+选中的鉴权插件由 `nacos.plugin.auth.type` 指定，`nacos.core.auth.system.type` 继续作为
+历史启动 alias。
 
 ## 插件 API
 

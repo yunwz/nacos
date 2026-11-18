@@ -46,7 +46,7 @@ Trace 事件分发运行在 Nacos 本地事件基础设施之上，并必须遵�
 
 | 方法 | 要求 |
 |------|------|
-| `getName()` | 稳定订阅者名称，重复名称后加载者会替换先加载者。 |
+| `getName()` | 稳定订阅者名称；重复名称保留先加载者，并记录 WARN 后忽略后来者。 |
 | `subscribeTypes()` | 该订阅者希望接收的 Trace 事件类。 |
 | `onEvent(event)` | 订阅者回调。 |
 | `executor()` | 可选的异步回调执行器。 |
@@ -92,15 +92,24 @@ Trace 事件携带事件类型、事件时间、命名空间、分组和资源�
 `AiResourceTraceEvent` 携带操作者、资源类型、资源标识、可选版本、操作、状态、
 客户端 IP 和可选扩展文本。
 
+Agent Discover 也复用该事件，以 `resourceType=agent`、`operation=DISCOVER`
+记录尽力而为的访问诊断；资源标识和版本保留在标准字段，命名空间、访问类型、来源应用、
+Client/连接标识及订阅触发标记放入 JSON `ext`。详细字段及边界见
+[Agent API 规范](../ai/agent-api-spec.md#discover-业务诊断事件)。
+
 ## 执行
 
 `NacosCombinedTraceSubscriber` 注册领域事件 publisher，并只把匹配的事件类分发给插件
 订阅者。如果 `executor()` 返回 `null`，回调会在事件分发路径中执行。写远端系统、文件、
 数据库或其他慢 sink 的插件应返回专用 executor。
 
+Combined subscriber 会记录全部已加载 Trace 实现的事件兴趣，包括启动时处于 disabled 状态的
+实现；每次事件分发前再检查统一 plugin state。因此运行时启停无需重建 combined subscriber，
+disabled 实现也不会收到新分发的任务。
+
 Trace publisher 允许在队列压力下丢弃 trace event 进行降级，具体边界遵循本地事件降级规则。
 
-Trace 订阅者通过 SPI 加载。同一类型内重复名称不适合生产稳定使用，插件包应使用唯一名称。
+Trace 订阅者通过 SPI 加载。重复名称采用 first-wins 并记录 WARN，但插件包仍应使用唯一名称。
 
 ## 降级
 

@@ -28,12 +28,24 @@ AI Registry 规范定义 Nacos 3.x 的 AI 资源模型。它扩展
 - [AI Registry 规范](ai-registry-spec.md)
 - [AI 资源模型规范](ai-resource-model-spec.md)
 - [AI 资源生命周期规范](ai-resource-lifecycle-spec.md)
+- [AI 资源检索规范](ai-resource-search-spec.md)
 - [AI Registry 适配器规范](ai-registry-adaptor-spec.md)
+- [ARD 协议规范](ard-protocol-spec.md)
+
+## Agent Registry
+
+- [Agent 管理规范](agent-management-spec.md)
+- [Remote Agent Discovery 协议规范](rad-protocol-spec.md)
+- [Agent API 规范](agent-api-spec.md)
+- [Agent 存储规范](agent-storage-spec.md)
+- [A2A Agent Binding 与兼容规范](a2a-agent-spec.md)
+- [历史 A2A 升级迁移规范](a2a-upgrade-migration-spec.md)
+- [3.3 Client AI API 修订提案（评审草案，未实现）](client-ai-api-evolution-spec.md)
+- [共享 JSON Schema 索引](../../schemas/README.md)
 
 ## 资源类型
 
 - [MCP Server 规范](mcp-server-spec.md)
-- [A2A Agent 规范](a2a-agent-spec.md)
 - [Prompt 规范](prompt-spec.md)
 - [Skill 规范](skill-spec.md)
 - [AgentSpec 规范](agentspec-spec.md)

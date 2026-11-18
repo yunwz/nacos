@@ -105,6 +105,9 @@ Admin API 或 Maintainer SDK，除非某能力被明确设计为仅控制台可�
 
 当前 v3 Console API 范围由 [V3 API 范围](../http-api/v3-api-surface.md)描述。
 
+远程 Admin 业务错误遵循[响应与错误规范](../http-api/response-error-spec.md)：独立 Console
+保留上游 HTTP 状态、业务码、摘要和字符串详情，不应将类型化业务失败统一转换为 `SERVER_ERROR`。
+
 ## 5. UI 入口与静态资源
 
 Console 负责浏览器入口和静态资源服务行为：
@@ -114,8 +117,17 @@ Console 负责浏览器入口和静态资源服务行为：
 - `nacos.console.ui.enabled` 控制是否开启开源 Console UI；
 - `announcement` 和 `console-guide` 内容在存在配置文件时作为展示内容读取；
 - 静态资源路径和浏览器资源可以排除鉴权，但该排除范围不得包含领域修改 API。
+- Next Console 顶栏的多语言导航文字不得将已认证用户的菜单和退出登录操作挤出桌面视口。
 
 Console guide 和 announcement 内容属于 UI 展示数据，不是标准 Core 服务端状态，也不得作为领域配置使用。
+
+Next UI 进入侧栏分组对应页面时必须自动展开该分组；用户仍必须能够手动折叠当前激活的分组，
+包括平台管理区域，且不得因此切换当前页面。
+
+生命周期托管的 AI Resource Detail Page 应共享相同的状态和 Version 展示组件。MCP、Skill 和 Prompt
+不得分别重复实现启用/禁用、公开/私有、最新、草稿、审核中、待发布或审核拒绝等视觉状态。MCP Detail
+从选中的 Online Version 创建新 Draft；只有保留的 MCP Resource 在唯一首个 Draft 删除后不存在任何
+Version 时，才展示通用“新建版本”入口。
 
 ## 6. Handler 与 Proxy 边界
 
@@ -144,6 +156,17 @@ Console Controller
   的领域实现；
 - 即使传输路径不同，handler 实现也必须在不同部署模式下返回相同领域语义。
 
+首期目标是在新版控制台已有正式配置的普通更新和 CAS 更新界面提供可选 `changeMessage`
+输入，在历史详情中以纯文本展示；首期不修改旧版控制台。新建和删除流程不提供说明
+输入；Beta/灰度和回滚不增加说明输入；不要求历史列表展示，也不提供按说明检索、排序或
+索引。后台普通和 CAS 发布 API
+对插入和更新采用相同的说明处理，不根据资源是否新建而忽略 API 调用方传入的说明。
+说明与配置描述独立，不从配置或历史记录预填。正式发布成功后清空输入，失败时保留输入。
+Beta 发布不提交或清空尚未发送的正式发布说明。
+适配器未保留该 JSON 属性时，历史详情可不显示说明；数据库持久化故障仍按原规则处理。
+合并部署和独立控制台转发必须遵循相同的
+[Config 持久化与历史规范](../config/config-persistence-history-spec.md)。
+
 ## 7. 独立 Console 部署
 
 在 `console` 部署模式下，Console 是访问一个或多个远端 Nacos Server 节点的管理面网关。
@@ -163,10 +186,11 @@ Console Controller
 
 ## 8. 安全边界
 
-Console 存在两个安全方向：
+Console 存在三个安全方向：
 
 1. 浏览器或运维人员访问 Console API；
-2. 独立 Console 进程访问 Nacos Server。
+2. 独立 Console 进程访问 Nacos Server；
+3. Console 进程访问显式配置或由请求选择的外部系统。
 
 规则：
 
@@ -176,10 +200,34 @@ Console 存在两个安全方向：
 - 只读 Console API 也必须声明读权限，除非它们被明确设计为公开健康检查、静态资源、初始化或
   展示端点；
 - 进入 Console 的浏览器请求不得被当作 server identity 请求信任；
-- 独立 Console 到 Server 的调用在启用 server identity 时必须携带配置的 server identity；
+- Console API 不得把请求选择的 URL 直接变成不受限制的服务端网络目标。
+  `GET /v3/console/ai/mcp/importToolsFromMcp` 默认允许公网目标，并可通过
+  `nacos.console.ai.mcp.import.enabled` 关闭；目标解析得到的每一个私网或本地地址都必须命中运维通过
+  `nacos.console.ai.mcp.import.allowed-private-addresses` 配置的 IP/CIDR 白名单，endpoint 必须保持为
+  已校验 base URL 下的相对地址，非法配置必须按拒绝处理，并且不得跟随重定向；
+- 独立 Console 代表已认证运维人员调用 Server 时，必须使用当前鉴权插件声明的标准名称，透传
+  identity builder 记录的全部非空请求身份字段；
+- 对于明确标记为 `ONLY_IDENTITY` 且需要委托 Server Admin API 的 Console 操作，Console
+ 在已完成运维人员身份校验后，可以在内部调用中使用配置的 server identity；该例外不得
+ 将浏览器提供的字段当作 server identity 信任；
+- `IdentityContext` 中的传输层派生字段和鉴权结果元数据不得透传；
+- 至少透传一个请求身份字段时不得同时携带配置的 server identity，使目标 Server 能够认证该
+  运维人员并校验其权限；
+- 无可用的非空请求身份字段时，独立 Console 到 Server 的调用在启用 server identity 时必须
+  降级使用配置的 server identity；
 - `nacos.core.auth.server.identity.key` 和 `nacos.core.auth.server.identity.value` 必须在独立
   Console 和目标 Nacos Server 部署之间保持一致；
+- 使用运维人员身份透传时，目标 Server 必须开启 Admin API 鉴权并使用兼容的鉴权插件；
 - Console 登录和 token 校验所需的 auth plugin token secret 必须与所选鉴权插件行为保持一致。
+
+独立部署的 Console 必须在开始接收请求前初始化本地鉴权插件运行环境。它对所有可配置鉴权实现
+应用 `STATIC > DEFAULT` 配置，以保证共享鉴权基础设施可用，但只为当前选中实现启动插件持有的
+运行资源。选中的实现不存在属于启动错误。该 Console 本地生命周期不得启动 Core 插件管理器，
+也不得访问由 Server 持有的插件 state、runtime-persisted 配置、local-only override、storage
+或集群同步能力。
+
+静态配置刷新可以重新应用声明为 `RUNTIME` 的鉴权字段。鉴权插件选择、token secret 和其他
+`RESTART` 字段在 Console 重启前保持启动值。
 
 Console 鉴权属于共享鉴权模型，必须遵循[鉴权规范](../http-api/authorization-spec.md)。
 
@@ -205,6 +253,21 @@ Console 应让 UI 用户能读懂错误，同时保持共享 API 契约：
 - Console module state 应暴露低基数运维状态，例如 UI 是否开启、默认 UI 版本和 Console
   auth 状态；
 - Console 指标和日志不得包含密钥、token、完整凭据或大体积用户载荷。
+
+### 10.1 实验性 AOT / Native 验收
+
+Console 遵循[服务端生命周期规范](../design/foundation-server-lifecycle-env-spec.md)中的
+多 Context AOT 契约。该契约不表示所有数据库、插件和业务路径已完成 Native 验证。
+
+- `merged` 的 console context 保留 core parent；`console` 只生成并启动独立 console context，
+  不能为了适配 Native 而启动本地域服务或存储。
+- 构建产物必须匹配部署类型、function mode 和插件集合；这些结构性选择改变时重新生成。
+  远端 Server 地址、端口和运行期凭据不得固化在生成的初始化代码中。
+- 普通 JVM 未开启 AOT 时，不得要求生成产物、运行其一致性检查或改变原有 handler 选择。
+- Native 验收必须包含 UI 入口及其 JS/CSS 资源、登录、匿名拒绝和真实 Console 业务读写，
+  不能以 liveness 或空列表代替功能成功。独立部署还应验证远端 handler 的返回模型和实际操作。
+- 普通 JVM 与 Native 的 Console / Server 互通结果应分别记录；合并部署通过不能代替独立部署。
+  AI 功能和扩展协议启用时应单独验证，未执行的数据库、集群和业务路径须明确列出。
 
 ## 11. 待处理问题
 

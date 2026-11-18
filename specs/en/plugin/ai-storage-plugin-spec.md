@@ -40,6 +40,7 @@ only own content bytes for an opaque storage key.
 | Opaque key | Provider-specific key that upper layers should not parse. |
 | Content | Binary or text payload associated with an AI resource version. |
 | Metadata | AI resource record stored by the AI persistence layer. |
+| Local visibility callback | Best-effort hint emitted after a provider observes a content change in its local read path. |
 
 ## SPI
 
@@ -48,7 +49,7 @@ Storage implementations are created by `AiResourceStorageBuilder`.
 | Builder method | Requirement |
 |----------------|-------------|
 | `type()` | Stable storage provider type. |
-| `build()` | Build an `AiResourceStorage`. |
+| `build()` | Build an `AiResourceStorage`, or return null when an optional provider is not statically configured for discovery. |
 
 The storage service implements:
 
@@ -58,6 +59,24 @@ The storage service implements:
 | `save(storageKey, content)` | Store content for the key. |
 | `get(storageKey)` | Read content for the key, or return null when absent. |
 | `delete(storageKey)` | Delete content for the key. |
+| `consistencyMode()` | Declare the provider's read-after-write and local-notification model. The compatibility default is `EVENTUAL_WITHOUT_NOTIFICATION`. |
+| `addChangeListener(listener)` | Register a local-visibility listener. The compatibility default is a no-op. |
+| `removeChangeListener(listener)` | Remove a local-visibility listener. The compatibility default is a no-op. |
+
+The consistency modes are:
+
+| Mode | Contract |
+|------|----------|
+| `STRONG` | A committed operation is visible through the provider's read path before it returns. A callback is not required for correctness. |
+| `EVENTUAL_WITH_NOTIFICATION` | A committed operation may become visible later on another node. The provider emits a best-effort local-visibility callback when its local read path may observe new content. |
+| `EVENTUAL_WITHOUT_NOTIFICATION` | A committed operation may become visible later and the provider offers no local callback contract. This is the default for existing third-party implementations. |
+
+A storage callback is an invalidation hint, not content, an authorization grant,
+or proof that every related metadata row is visible. It may be duplicated,
+coarse-grained, delayed, or delivered before the corresponding AI resource
+change hint. Its provider-specific notification key remains opaque. A provider
+may include a resource-type hint when it can infer one without reversing an
+opaque or hashed key; consumers must tolerate an absent hint.
 
 The plugin is exposed to the core plugin manager as type `ai-storage`.
 
@@ -68,8 +87,129 @@ opaque key. `AiResourceStorageRouter` routes by provider. Storage plugins must
 not parse Nacos resource identity from opaque keys unless their own provider
 contract defines that encoding.
 
+Before selecting the registered provider, the router checks unified plugin
+state for `ai-storage:{provider}`. A disabled provider fails routing explicitly
+and must not receive content operations.
+
 The default provider is `nacos_config`, which stores AI resource content through
 Nacos config storage.
+It declares `EVENTUAL_WITH_NOTIFICATION` and adapts local Config cache-change
+events for AI-owned coordinates into storage local-visibility callbacks. It
+must not emit callbacks for ordinary user Config coordinates.
+When the `nacos_config` provider maps an opaque key to a Nacos config coordinate,
+it must use stable physical mappings for the logical `dataId` and canonical
+resource group:
+
+- For `dataId`, only ASCII letters, ASCII digits, and `_`, `-`, `.`, and `:` are
+  preserved. If the logical value contains any other character, the entire value
+  is encoded as `enc.` followed by the lowercase hexadecimal representation of
+  its UTF-8 bytes. Logical values beginning with the reserved `enc.` prefix,
+  matched case-insensitively, are encoded in the same way so they cannot alias an
+  automatically encoded value. If that encoded candidate exceeds 255 characters,
+  it is replaced with `sha256.` followed by the complete lowercase hexadecimal
+  SHA-256 digest of the candidate.
+- A canonical resource group is preserved when it does not exceed 128
+  characters. If it exceeds that limit, it is replaced with the stable resource
+  prefix followed by `sha256.` and the complete lowercase hexadecimal SHA-256
+  digest of the canonical group. Conditional group segments reserve and escape
+  both the same case-insensitive `enc.` namespace and the exact
+  `sha256.<64-hex>` fallback shape before the canonical group is built.
+- Physical forms matching the reserved SHA-256 fallback shape are hashed again,
+  even when already within the length limit, so a logical key cannot directly
+  alias a generated fallback key.
+
+The SHA-256 fallback is deterministic but not reversible. Logical resource
+identity remains owned by AI resource metadata. `save`, `get`, and `delete` must
+apply exactly the same physical mappings.
+
+### Agent Logical Coordinate
+
+For `type=agent`, the Agent domain constructs this logical Nacos Config
+coordinate before handing the provider an opaque `StorageKey`:
+
+```text
+group  = agent-version
+dataId = agent__<rad-ascii-v1(agentName)>__<version>.json
+```
+
+`rad-ascii-v1` and the complete Agent Version storage contract are defined by
+the [Agent Storage Spec](../ai/agent-storage-spec.md). This coordinate is a
+logical provider input, not a physical Config identity exposed to callers.
+
+The built-in provider must pass both logical segments through the common
+`NacosAiConfigKeyCodec`; it must not bypass that codec because the Agent domain
+already encoded `agentName`. A safe value within the physical limit remains
+identical to the logical value. The common codec owns all length and
+reserved-shape handling: an overlong candidate uses its deterministic SHA-256
+fallback, and that physical result is not reversible.
+
+Upper layers may persist the logical key format and content digest, but must not
+parse a physical Config key, require it to be reversible, or reconstruct Agent
+identity from it. `save`, `get`, and `delete` always recompute the physical
+coordinate through the same codec.
+
+The provider does not dual-read coordinates produced by an earlier physical
+mapping. Existing affected `nacos_config` rows must therefore be migrated in a
+coordinated maintenance window before nodes using only the new mapping start.
+Migration must be limited to AI-owned coordinates, preflight target-key
+uniqueness, and rebuild config caches after the rewrite. The legacy Prompt
+mirror in group `nacos-ai-prompt` is a compatibility coordinate outside this
+mapping and must remain unchanged.
+
+## Plugin State And Configuration
+
+AI storage providers participate in unified plugin state. Disabling a
+non-critical provider keeps the instance loaded and visible to plugin
+management, but the router rejects new operations for that provider. The
+built-in `ai-storage:nacos_config` provider is the default backend and a
+critical plugin required by server AI capabilities, so it cannot be disabled
+through plugin management while the server depends on it.
+
+The following property selects the provider for new writes across all AI
+resource domains:
+
+```properties
+nacos.ai.storage.provider=nacos_config
+```
+
+For compatibility, the following existing domain properties remain supported:
+
+```properties
+nacos.ai.prompt.storage.provider=
+nacos.ai.skill.storage.provider=
+nacos.ai.agentspec.storage.provider=
+nacos.ai.agent.storage.provider=
+```
+
+A non-blank domain property overrides the global property for that domain. If
+neither is configured, the domain uses `nacos_config`. These properties are
+domain routing policy, not private configuration definitions owned by
+`ai-storage:nacos_config`.
+
+When the AI module is active, every effective provider selected after applying the precedence above
+is a required implementation of this critical routed type. Before startup succeeds, every distinct
+selected provider must be discovered and enabled; a different available provider is not a valid
+fallback. When the AI module is disabled by function mode or
+`nacos.extension.ai.enabled=false`, AI storage is inactive and does not impose a startup
+requirement.
+
+AI storage implementations are built from Spring-managed services during context refresh, so this
+type does not participate in pre-refresh critical validation. The unified plugin manager performs
+the same provider-specific validation immediately after the storage builders register their
+instances and before Nacos reports startup success.
+
+`AiResourceStorage` extends `PluginConfigSpec`. The built-in provider has no private configuration,
+declares no definitions, and is exposed as `configurable=false`. A built storage implementation
+that owns private configuration declares definitions and callbacks through the inherited contract,
+using canonical keys under:
+
+```properties
+nacos.plugin.ai-storage.{provider}.{itemKey}
+```
+
+The storage builder is responsible for constructing the service before core
+plugin discovery. Unified configuration metadata and apply behavior belong to
+the built service instance, not to the builder or the domain routing keys.
 
 ## Requirements
 
@@ -78,6 +218,14 @@ resource metadata, version state, [visibility](../auth/visibility-plugin-spec.md
 or authorization. Missing storage providers must fail explicitly. Publish-time
 review remains owned by the [AI pipeline](ai-pipeline-plugin-spec.md).
 
+The AI resource layer owns cross-node resource-change notification. Storage
+callbacks and resource-change hints may both enqueue the same node-local,
+delay-merged projection refresh. Such refresh work is transient process state:
+it must not be persisted to `ai_resource_task` or another durable task table.
+Durable search-index and lifecycle tasks remain independent from Watch
+projection refresh. Providers must not publish resource bytes through the
+callback contract.
+
 Implementations must document:
 
 - maximum supported content size;
@@ -85,10 +233,3 @@ Implementations must document:
 - whether reads are strongly consistent or eventually consistent;
 - backup and migration behavior;
 - whether storage keys can be exposed in API responses or logs.
-
-## Current Integration Note
-
-The core plugin manager can list loaded AI storage plugins. Current code notes
-that enable or disable through unified plugin management is not yet wired into
-`AiResourceStorageRouter`. Routing is controlled by registered storage
-providers until that integration is completed.

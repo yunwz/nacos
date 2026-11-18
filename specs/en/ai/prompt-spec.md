@@ -48,7 +48,8 @@ Prompt follows the shared [AI Resource Lifecycle Spec](ai-resource-lifecycle-spe
 
 - create draft from new content or an existing version;
 - update or delete the current draft;
-- submit to publish pipeline or direct publish when no pipeline applies;
+- submit a draft or reviewed version to publish pipeline or direct publish when
+  no pipeline applies, and submit a reviewing version idempotently;
 - publish, force publish, online/offline, update labels, update description,
   update business tags, and delete;
 - query by explicit version, label, or `latest`.
@@ -64,7 +65,28 @@ server may return a not-modified error.
 Subscriptions should report Prompt changes without exposing broad management
 listing behavior to runtime clients.
 
-## 5. Migration
+Prompt participates in generic AI Resource Search and provides a
+resource-specific Search facade with `resourceType=prompt` fixed. Both reuse
+the same index and Query Planner from the
+[AI Resource Search Spec](ai-resource-search-spec.md). The Prompt handler
+projects only caller-visible, enabled resources whose latest resolves to an
+online Version, including name, description, business tags, and template
+description suitable for search. Credentials, secret defaults, and runtime
+parameter values that may occur in a template do not enter chunks. Generic
+Search restricted to Prompt matches resource-specific Search eligibility,
+visibility, and currentness.
+The Client facade is `GET /v3/client/ai/prompt/search`; it accepts `query`,
+repeated `tagsAll`, `pageNo`, and `pageSize`, and returns
+`Page<PromptMetaSummary>`.
+
+## 5. Storage
+
+Prompt persists the selected storage provider in each version descriptor.
+Operations on an existing version use that persisted provider; the effective
+provider configuration applies only to new versions. A legacy descriptor
+without a provider uses `nacos_config`.
+
+## 6. Migration
 
 Prompt has a migration task from legacy Prompt storage to
 `ai_resource + ai_resource_version + AI storage`. Migration must:
@@ -74,7 +96,7 @@ Prompt has a migration task from legacy Prompt storage to
 - preserve existing versions and latest behavior where possible;
 - keep legacy mappings as compatibility storage, not formal Config semantics.
 
-## 6. Evolution Note
+## 7. Evolution Note
 
 Prompt formats, variable schemas, tool-call conventions, and model-provider
 requirements may change quickly. Prompt spec revisions may introduce new

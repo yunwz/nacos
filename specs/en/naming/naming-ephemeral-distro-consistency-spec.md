@@ -42,6 +42,7 @@ client:
 | Client category | Owner rule |
 | --- | --- |
 | Connection-based client | The node holding the live gRPC connection owns the native client. |
+| HTTP connection-based client | Distro responsibility selects an owner using the internal `HTTP_CLIENT@@<externalClientId>` id. |
 | Ephemeral IP-port client | The node selected by Distro responsibility for the client responsible id owns the native client. |
 | Synced client | A remote copy received from another owner node. It is serving state, not local ownership. |
 
@@ -59,6 +60,13 @@ published service identities, instance publish information, optional batch
 instance data, and the client revision used by verify flow. Distro does not
 use service-level rows as the source of truth; service views are derived from
 client state and indexes.
+
+An HTTP connection-based Client uses the same resource type and
+`DistroClientDataProcessor`. Client attributes carry namespace, authenticated
+subject identity, Client liveness, and Publisher liveness; no domain-specific
+Distro payload is added. Ordinary renewal only changes timestamps and need not
+emit `CHANGE`. Publication or semantic health-projection changes continue to
+use the normal Client revision and `CHANGE`.
 
 ## 4. Change Propagation
 
@@ -88,9 +96,12 @@ a matching revision refreshes the target-side liveness observation; a mismatch
 requires repair.
 
 Snapshot transfer is anti-entropy for the whole Naming ephemeral Distro data
-type. A snapshot contains all responsible ephemeral clients from the source
-node. Loading a snapshot must process each client with the same sync-data
-application rules as normal `ADD` or `CHANGE`.
+type. A snapshot contains all ephemeral clients from the source node except
+connection-based clients. A connection-based client is exclusively written by
+the node holding its live gRPC connection and must not enter snapshots;
+missing connection-based clients on the receiving node are repaired through
+verify-triggered repair. Loading a snapshot must process each client with the
+same sync-data application rules as normal `ADD` or `CHANGE`.
 
 ## 6. Expiration And Cleanup
 
@@ -102,6 +113,14 @@ copies and local indexes can be cleaned.
 Ephemeral IP-port clients expire through heartbeat and cache-time based cleanup.
 The owner node must remove expired native clients and publish the same
 disconnect events used by Distro deletion.
+
+The responsible node checks HTTP connection-based Client and Publisher
+liveness separately. Publisher expiration removes only that Client's
+publications, so a Client with subscriber state may remain. Client expiration
+uses the normal Client release events to clean all publisher and subscriber
+state. Replica cleanup and a later responsibility transfer reuse the latest
+successful Distro verify observation as the local timeout lower bound; the
+Client does not store a parallel responsibility flag.
 
 Remote synced clients are cleanup targets owned by the Distro path. They must
 not renew native ownership on the receiving node.

@@ -19,6 +19,8 @@
 This document defines the standard metadata and version model for AI Registry
 resources. It refines the [AI Registry Spec](ai-registry-spec.md).
 
+Scope validation follows the selected visibility service catalog; built-in values and creation defaults remain unchanged.
+
 ## 1. Identity
 
 AI resource metadata identity is:
@@ -44,7 +46,7 @@ still `resourceName`.
 | Field | Meaning |
 | --- | --- |
 | `namespaceId` | Namespace isolation boundary. |
-| `type` | Resource type, such as `prompt`, `skill`, or `agentspec`. |
+| `type` | Resource type, such as `mcp`, `agent`, `prompt`, `skill`, or `agentspec`. |
 | `name` | Stable resource name. |
 | `desc` | Resource description. |
 | `status` | Resource metadata status, currently `enable` or `disable`. |
@@ -105,9 +107,41 @@ The default storage implementation is Nacos Config based, but Config is only a
 storage backend here. AI resource content stored through `nacos_config` must not
 be treated as user-owned Config resources.
 
+Each version must persist its selected storage provider in
+`AiResourceVersion.storage`. The effective provider configuration selects the
+provider only when a new version is written. Reads, draft replacements, and
+deletes for an existing version must route through its persisted provider. A
+legacy storage descriptor without a provider belongs to `nacos_config`.
+
 Storage extension behavior is defined by the
 [AI Storage Plugin Spec](../plugin/ai-storage-plugin-spec.md). Database dialect
 behavior is defined by the [Data Source Dialect Plugin Spec](../plugin/datasource-dialect-plugin-spec.md).
+
+Type-owned JSON must have an explicit schema contract. For `type=agent`, `ext`
+contains the directory extension and derived online-version catalog, while the
+version `storage` points to one complete Agent version content object. Exact
+fields and rebuild rules are defined by the
+[Agent Management Spec](agent-management-spec.md) and the
+[Agent Storage Spec](agent-storage-spec.md). Runtime Agent endpoints are not
+stored in `AiResourceVersion.storage` because they follow a client-owned Naming
+lifecycle.
+
+For `type=mcp`, the canonical name is `mcpName`. Resource `ext` stores only the
+schema version and deprecated UUID-shaped `mcpId` physical-storage and legacy
+API alias. A Version `storage` descriptor points to the existing MCP Server
+and optional Tools/Resources Config objects through the allowlisted
+`mcp-config-v1` key format. It does not copy, rewrite, or extend those payloads
+or turn them into user-owned Config resources. Exact fields are defined by the
+[MCP Server Spec](mcp-server-spec.md) and the MCP
+[Resource extension](../../schemas/ai/mcp/internal/v1/mcp-resource-ext.schema.json)
+and [Version storage](../../schemas/ai/mcp/internal/v1/mcp-version-storage.schema.json)
+schemas.
+
+MCP Runtime Endpoints are not stored in `AiResourceVersion.storage`. They use
+client-owned Naming runtime state. An MCP ordinary Service Ref remains owned by
+its Naming user. An MCP Direct persistent Naming Service remains the current
+endpoint fact and compatibility serving contract; it is not replaced by a
+Version Config snapshot during lifecycle hosting.
 
 ## 6. Visibility
 
@@ -123,6 +157,9 @@ Rules:
   scope mutation;
 - query operations should use visibility query advice instead of post-filtering
   large result sets whenever possible.
+- caller-supplied business filters such as owner and scope must be intersected
+  with visibility query advice before count and pagination; type implementations
+  must not overwrite visibility conditions after conversion.
 
 The extension contract is defined by the
 [Visibility Plugin Spec](../auth/visibility-plugin-spec.md).

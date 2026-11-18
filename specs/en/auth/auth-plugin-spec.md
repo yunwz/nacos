@@ -38,7 +38,7 @@ A server auth plugin implements `AuthPluginService`.
 
 | Method | Requirement |
 |--------|-------------|
-| `getAuthServiceName()` | Return the stable plugin name selected by `nacos.core.auth.system.type`. |
+| `getAuthServiceName()` | Return the stable plugin name selected by `nacos.plugin.auth.type`; `nacos.core.auth.system.type` is the legacy alias. |
 | `identityNames()` | Declare identity fields that may be extracted from requests. |
 | `enableAuth(action, type)` | Decide whether this plugin requires auth for the action and sign type. |
 | `validateIdentity(identityContext, resource)` | Authenticate the caller and enrich identity metadata. |
@@ -93,12 +93,23 @@ payloads independently.
 The selected auth implementation is named by:
 
 ```properties
-nacos.core.auth.system.type=nacos
+nacos.plugin.auth.type=nacos
 ```
 
 Auth plugins are also registered in the core plugin system with type `auth`.
 Only the selected and enabled auth plugin may handle requests. If a plugin is
 loaded but disabled by plugin state, it must not be used for auth decisions.
+The legacy `nacos.core.auth.system.type` key remains a startup alias. Selection
+is static and requires restart; the runtime status API must not switch auth
+implementations.
+
+The auth plugin type is an active critical dependency when any of
+`nacos.core.auth.enabled`, `nacos.core.auth.admin.enabled`, or
+`nacos.core.auth.console.enabled` is enabled. It is also active when an auth type is explicitly
+configured while all three request-entry switches are disabled. The latter preloads and applies the
+selected plugin so an operator may verify client identities before enabling an auth scope through a
+server configuration refresh. Startup must fail clearly when the selected implementation is not
+discovered; it must not fall back to another auth implementation.
 
 ## Identity Context
 
@@ -111,6 +122,17 @@ loaded but disabled by plugin state, it must not be used for auth decisions.
   external principal.
 - Auth result metadata such as authenticated username, user id, or global admin
   marker.
+
+Protocol identity builders must separately record the canonical names of
+identity parameters that were actually extracted from the request. These names
+must not include transport-derived fields or metadata later added by an auth
+plugin. HTTP identity names are matched case-insensitively, while the canonical
+spelling declared by `AuthPluginService.identityNames()` is retained.
+
+Components that forward caller credentials may only forward the recorded
+request identity parameters. They must not enumerate or forward every value in
+`IdentityContext`, because the context also contains trusted transport and auth
+result metadata.
 
 Identity names are part of the plugin contract. Server and client plugin
 implementations must agree on those names.

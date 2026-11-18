@@ -17,7 +17,10 @@
 package com.alibaba.nacos.client.ai.remote.redo;
 
 import com.alibaba.nacos.api.ai.model.a2a.AgentEndpoint;
+import com.alibaba.nacos.api.ai.model.agent.AgentEndpointRegistrationBatch;
 import com.alibaba.nacos.api.exception.NacosException;
+import com.alibaba.nacos.api.exception.api.NacosApiException;
+import com.alibaba.nacos.api.model.v2.ErrorCode;
 import com.alibaba.nacos.client.ai.remote.AiGrpcClient;
 import com.alibaba.nacos.client.naming.remote.gprc.redo.data.NamingRedoData;
 import com.alibaba.nacos.client.redo.data.RedoData;
@@ -46,9 +49,59 @@ public class AiRedoScheduledTask extends AbstractRedoTask<AiGrpcRedoService> {
         try {
             redoForMcpSeverEndpoint();
             redoForAgentEndpoint();
+            redoForAgentEndpointPublication();
         } catch (Exception e) {
             LOGGER.warn("Redo task run with unexpected exception: ", e);
         }
+    }
+    
+    private void redoForAgentEndpointPublication() {
+        for (RedoData<AgentEndpointRegistrationBatch> each : getRedoService()
+            .findAgentEndpointPublicationRedoData()) {
+            AgentEndpointPublicationRedoData redoData =
+                (AgentEndpointPublicationRedoData) each;
+            try {
+                if (aiGrpcClient.dispatchAgentEndpointPublicationRedo(redoData)) {
+                    continue;
+                }
+                redoForAgentEndpointPublication(redoData);
+            } catch (NacosException e) {
+                if (isPublicationCapacityRejected(e)) {
+                    aiGrpcClient.discardAgentEndpointPublicationAfterCapacityRejection(
+                        redoData.getNamespaceId(), redoData.getKey(), redoData.get());
+                }
+                LOGGER.error("Redo Agent Endpoint publication operation {} for {} failed.",
+                    each.getRedoType(), redoData.getKey(), e);
+            }
+        }
+    }
+    
+    private void redoForAgentEndpointPublication(AgentEndpointPublicationRedoData redoData)
+        throws NacosException {
+        if (!aiGrpcClient.isEnable()) {
+            return;
+        }
+        switch (redoData.getRedoType()) {
+            case REGISTER:
+                aiGrpcClient.doRegisterAgentEndpoints(redoData.getKey(), redoData.getNamespaceId(),
+                    redoData.get());
+                break;
+            case UNREGISTER:
+                AgentEndpointRegistrationBatch batch = redoData.get();
+                aiGrpcClient.doDeregisterAgentEndpoints(redoData.getKey(),
+                    redoData.getNamespaceId(), batch.getAgentName(), batch.getProtocol());
+                break;
+            case REMOVE:
+                getRedoService().removeAgentEndpointPublication(redoData.getKey());
+                break;
+            default:
+        }
+    }
+    
+    private boolean isPublicationCapacityRejected(NacosException exception) {
+        return exception instanceof NacosApiException
+            && ((NacosApiException) exception)
+                .getDetailErrCode() == ErrorCode.AGENT_ENDPOINT_PUBLICATION_OVER_LIMIT.getCode();
     }
     
     private void redoForAgentEndpoint() {
@@ -90,7 +143,7 @@ public class AiRedoScheduledTask extends AbstractRedoTask<AiGrpcRedoService> {
                 aiGrpcClient.doDeregisterAgentEndpoint(agentName, endpoint);
                 break;
             case REMOVE:
-                getRedoService().removeAgentEndpointForRedo(agentName);
+                getRedoService().removeAgentEndpointForRedo(redoData.getKey());
                 break;
             default:
         }

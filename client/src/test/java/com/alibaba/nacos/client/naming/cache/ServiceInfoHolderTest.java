@@ -22,34 +22,50 @@ import com.alibaba.nacos.api.PropertyKeyConst;
 import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.alibaba.nacos.api.naming.pojo.ServiceInfo;
+import com.alibaba.nacos.api.naming.remote.request.NotifySubscriberRequest;
 import com.alibaba.nacos.client.env.NacosClientProperties;
 import com.alibaba.nacos.client.monitor.MetricsMonitor;
 import com.alibaba.nacos.client.naming.backups.FailoverReactor;
-import io.prometheus.client.Gauge;
+import com.alibaba.nacos.client.naming.event.InstancesChangeEvent;
+import com.alibaba.nacos.client.naming.event.InstancesChangeNotifier;
+import com.alibaba.nacos.client.naming.listener.NamingChangeEvent;
+import com.alibaba.nacos.client.naming.remote.gprc.NamingPushRequestHandler;
+import com.alibaba.nacos.client.naming.selector.DefaultNamingSelector;
+import com.alibaba.nacos.client.naming.selector.NamingSelectorWrapper;
+import com.alibaba.nacos.common.notify.NotifyCenter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 
+import java.io.File;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ServiceInfoHolderTest {
@@ -107,6 +123,70 @@ class ServiceInfoHolderTest {
     }
     
     @Test
+    void testConcurrentUpdateDiffUsesReplacedServiceInfo() throws Exception {
+        ServiceInfo initial = new ServiceInfo("a@@b");
+        initial.setHosts(Collections.singletonList(createInstance("1.1.1.1", 1)));
+        holder.processServiceInfo(initial);
+        
+        Instance intermediateInstance = createInstance("1.1.1.2", 2);
+        ServiceInfo intermediate = new ServiceInfo("a@@b");
+        intermediate.setHosts(Collections.singletonList(intermediateInstance));
+        Instance incomingInstance = createInstance("1.1.1.3", 3);
+        ServiceInfo incoming = Mockito.spy(new ServiceInfo("a@@b"));
+        incoming.setHosts(Collections.singletonList(incomingInstance));
+        CountDownLatch validating = new CountDownLatch(1);
+        CountDownLatch resume = new CountDownLatch(1);
+        Mockito.doAnswer(invocation -> {
+            validating.countDown();
+            assertTrue(resume.await(10, TimeUnit.SECONDS));
+            return invocation.callRealMethod();
+        }).doCallRealMethod().when(incoming).getHosts();
+        
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<InstancesChangeEvent> update = executor.submit(() -> {
+                try (MockedStatic<NotifyCenter> notifyCenter =
+                    Mockito.mockStatic(NotifyCenter.class)) {
+                    holder.processServiceInfo(incoming);
+                    ArgumentCaptor<InstancesChangeEvent> event =
+                        ArgumentCaptor.forClass(InstancesChangeEvent.class);
+                    notifyCenter.verify(() -> NotifyCenter.publishEvent(event.capture()));
+                    return event.getValue();
+                }
+            });
+            assertTrue(validating.await(10, TimeUnit.SECONDS));
+            holder.processServiceInfo(intermediate);
+            resume.countDown();
+            
+            InstancesChangeEvent event = update.get(10, TimeUnit.SECONDS);
+            assertEquals(Collections.singletonList(intermediateInstance),
+                event.getInstancesDiff().getRemovedInstances());
+            assertEquals(Collections.singletonList(incomingInstance),
+                event.getInstancesDiff().getAddedInstances());
+            assertEquals(Collections.singletonList(incomingInstance), event.getHosts());
+            assertSame(incoming, holder.getServiceInfoMap().get(incoming.getKeyWithoutClusters()));
+        } finally {
+            resume.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+    
+    @Test
+    void testProtectedEmptyPushDoesNotReplaceCachedServiceInfo() throws NacosException {
+        nacosClientProperties.setProperty(PropertyKeyConst.NAMING_PUSH_EMPTY_PROTECTION, "true");
+        holder.shutdown();
+        holder = new ServiceInfoHolder("aa", "scope-001", nacosClientProperties);
+        ServiceInfo initial = new ServiceInfo("a@@b");
+        initial.setHosts(Collections.singletonList(createInstance("1.1.1.1", 1)));
+        holder.processServiceInfo(initial);
+        ServiceInfo empty = new ServiceInfo("a@@b");
+        
+        assertSame(initial, holder.processServiceInfo(empty));
+        assertSame(initial, holder.getServiceInfoMap().get(initial.getKeyWithoutClusters()));
+    }
+    
+    @Test
     void testProcessServiceInfoEnableClientMetricsTrue() {
         ServiceInfoHolder holder = createServiceInfoHolder(true);
         ServiceInfo info = new ServiceInfo("a@@b@@c");
@@ -117,15 +197,12 @@ class ServiceInfoHolderTest {
         hosts.add(instance2);
         info.setHosts(hosts);
         
-        Gauge.Child mockGaugeChild = mock(Gauge.Child.class);
         try (MockedStatic<MetricsMonitor> mockedMetricsMonitor =
             Mockito.mockStatic(MetricsMonitor.class)) {
-            mockedMetricsMonitor.when(MetricsMonitor::getServiceInfoMapSizeMonitor)
-                .thenReturn(mockGaugeChild);
             
             holder.processServiceInfo(info);
             
-            verify(mockGaugeChild, times(1)).set(1);
+            mockedMetricsMonitor.verify(() -> MetricsMonitor.recordServiceInfoMapSize(1), times(1));
         }
     }
     
@@ -144,7 +221,8 @@ class ServiceInfoHolderTest {
             Mockito.mockStatic(MetricsMonitor.class)) {
             holder.processServiceInfo(info);
             
-            mockedMetricsMonitor.verify(MetricsMonitor::getServiceInfoMapSizeMonitor, never());
+            mockedMetricsMonitor.verify(() -> MetricsMonitor.recordServiceInfoMapSize(anyInt()),
+                never());
         }
     }
     
@@ -160,15 +238,12 @@ class ServiceInfoHolderTest {
         
         info.setHosts(hosts);
         
-        Gauge.Child mockGaugeChild = mock(Gauge.Child.class);
         try (MockedStatic<MetricsMonitor> mockedMetricsMonitor =
             Mockito.mockStatic(MetricsMonitor.class)) {
-            mockedMetricsMonitor.when(MetricsMonitor::getServiceInfoMapSizeMonitor)
-                .thenReturn(mockGaugeChild);
             
             holder.processServiceInfo(info);
             
-            verify(mockGaugeChild, times(1)).set(1);
+            mockedMetricsMonitor.verify(() -> MetricsMonitor.recordServiceInfoMapSize(1), times(1));
         }
     }
     
@@ -183,14 +258,12 @@ class ServiceInfoHolderTest {
         hosts.add(instance2);
         info.setHosts(hosts);
         
-        Gauge.Child mockGaugeChild = mock(Gauge.Child.class);
         RuntimeException exception = new RuntimeException("Mocked exception");
         
         try (MockedStatic<MetricsMonitor> mockedMetricsMonitor =
             Mockito.mockStatic(MetricsMonitor.class)) {
-            mockedMetricsMonitor.when(MetricsMonitor::getServiceInfoMapSizeMonitor)
-                .thenReturn(mockGaugeChild);
-            doThrow(exception).when(mockGaugeChild).set(anyInt());
+            mockedMetricsMonitor.when(() -> MetricsMonitor.recordServiceInfoMapSize(anyInt()))
+                .thenThrow(exception);
             
             ServiceInfo actual2 = holder.processServiceInfo(info);
             
@@ -213,6 +286,59 @@ class ServiceInfoHolderTest {
             
             ServiceInfoDiskCacheRefresher refresher = getServiceInfoDiskCacheRefresher(holder);
             assertEquals(1, refresher.pendingEventSize());
+        }
+    }
+    
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testPushFlagPreservesDiffAndDuplicateSuppression(boolean pushFirst) {
+        NamingPushRequestHandler pushHandler = new NamingPushRequestHandler(holder);
+        InstancesChangeNotifier notifier = new InstancesChangeNotifier("scope-001");
+        List<NamingChangeEvent> events = new ArrayList<>();
+        notifier.registerListener("a", "b", new NamingSelectorWrapper("b", "a", "",
+            new DefaultNamingSelector(instance -> true),
+            event -> events.add((NamingChangeEvent) event)));
+        ServiceInfo first = new ServiceInfo("a@@b");
+        first.setHosts(Collections.singletonList(createInstance("1.1.1.1", 1)));
+        ServiceInfo equivalent = new ServiceInfo("a@@b");
+        equivalent.setHosts(Collections.singletonList(createInstance("1.1.1.1", 1)));
+        
+        try (MockedStatic<NotifyCenter> notifications = Mockito.mockStatic(NotifyCenter.class)) {
+            notifications.when(() -> NotifyCenter.publishEvent(any(InstancesChangeEvent.class)))
+                .thenAnswer(invocation -> {
+                    notifier.onEvent(invocation.getArgument(0));
+                    return true;
+                });
+            if (pushFirst) {
+                pushHandler.requestReply(
+                    NotifySubscriberRequest.buildNotifySubscriberRequest(first), null);
+                holder.processServiceInfo(equivalent);
+            } else {
+                holder.processServiceInfo(first);
+                pushHandler.requestReply(
+                    NotifySubscriberRequest.buildNotifySubscriberRequest(equivalent), null);
+            }
+            assertEquals(1, events.size());
+            assertEquals(pushFirst, events.get(0).isFromPush());
+            assertEquals(first.getHosts(), events.get(0).getAddedInstances());
+            
+            ServiceInfo updated = new ServiceInfo("a@@b");
+            Instance changed = createInstance("1.1.1.1", 1);
+            changed.setWeight(2.0);
+            updated.setHosts(Collections.singletonList(changed));
+            pushHandler.requestReply(
+                NotifySubscriberRequest.buildNotifySubscriberRequest(updated), null);
+            assertEquals(2, events.size());
+            assertTrue(events.get(1).isFromPush());
+            assertEquals(updated.getHosts(), events.get(1).getModifiedInstances());
+            
+            ServiceInfo removed = new ServiceInfo("a@@b");
+            removed.setHosts(Collections.emptyList());
+            holder.processServiceInfo(removed);
+            assertEquals(3, events.size());
+            assertFalse(events.get(2).isFromPush());
+            assertEquals(updated.getHosts(), events.get(2).getRemovedInstances());
+            assertEquals(pushFirst, events.get(0).isFromPush());
         }
     }
     
@@ -245,15 +371,16 @@ class ServiceInfoHolderTest {
         assertEquals(expect.getKey(), actual.getKey());
     }
     
-    @Test
-    void testProcessServiceInfoWithPushEmpty() throws NacosException {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testProcessServiceInfoWithPushEmpty(boolean fromPush) throws NacosException {
         ServiceInfo oldInfo = new ServiceInfo("a@@b@@c");
         Instance instance1 = createInstance("1.1.1.1", 1);
         Instance instance2 = createInstance("1.1.1.2", 2);
         List<Instance> hosts = new ArrayList<>();
         hosts.add(instance1);
         hosts.add(instance2);
-        oldInfo.setHosts(hosts);
+        oldInfo.setHosts(new ArrayList<>(hosts));
         
         nacosClientProperties.setProperty(PropertyKeyConst.NAMING_PUSH_EMPTY_PROTECTION, "true");
         holder.shutdown();
@@ -262,10 +389,14 @@ class ServiceInfoHolderTest {
         
         ServiceInfo newInfo = new ServiceInfo("a@@b@@c");
         
-        final ServiceInfo actual = holder.processServiceInfo(newInfo);
-        
-        assertEquals(oldInfo.getKey(), actual.getKey());
-        assertEquals(2, actual.getHosts().size());
+        try (MockedStatic<NotifyCenter> notifications = Mockito.mockStatic(NotifyCenter.class)) {
+            final ServiceInfo actual = holder.processServiceInfo(newInfo, fromPush);
+            assertSame(oldInfo, actual);
+            assertSame(oldInfo, holder.getServiceInfoMap().get(oldInfo.getKeyWithoutClusters()));
+            assertEquals(hosts, actual.getHosts());
+            notifications.verify(() -> NotifyCenter.publishEvent(any(InstancesChangeEvent.class)),
+                never());
+        }
     }
     
     @Test
@@ -353,7 +484,8 @@ class ServiceInfoHolderTest {
         nacosClientProperties.setProperty(PropertyKeyConst.NAMING_CACHE_REGISTRY_DIR, "non-exist");
         holder.shutdown();
         holder = new ServiceInfoHolder("aa", "scope-001", nacosClientProperties);
-        assertEquals(System.getProperty("user.home") + "/nacos/non-exist/naming/aa",
+        assertEquals(System.getProperty("user.home") + File.separator + "nacos" + File.separator
+            + "non-exist" + File.separator + "naming" + File.separator + "aa",
             holder.getCacheDir());
         assertTrue(holder.getServiceInfoMap().isEmpty());
     }

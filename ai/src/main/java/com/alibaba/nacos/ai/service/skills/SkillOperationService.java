@@ -18,10 +18,8 @@ package com.alibaba.nacos.ai.service.skills;
 
 import com.alibaba.nacos.api.ai.model.skills.BatchUploadResult;
 import com.alibaba.nacos.api.ai.model.skills.Skill;
-import com.alibaba.nacos.api.ai.model.skills.SkillBasicInfo;
 import com.alibaba.nacos.api.ai.model.skills.SkillMeta;
 import com.alibaba.nacos.api.ai.model.skills.SkillSummary;
-import com.alibaba.nacos.api.ai.model.skills.SkillUploadPrecheckRequest;
 import com.alibaba.nacos.api.ai.model.skills.SkillUploadPrecheckResult;
 import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.model.Page;
@@ -48,24 +46,24 @@ public interface SkillOperationService {
     String uploadSkillFromZip(SkillUploadRequest request) throws NacosException;
     
     /**
-     * Batch precheck multiple skill uploads.
+     * Precheck one or more skill uploads from a zip archive.
      *
-     * @param requests list of precheck requests
-     * @return list of precheck results (same order as input)
-     * @throws NacosException if precheck failed unexpectedly
+     * @param namespaceId namespace ID
+     * @param zipBytes zip file bytes containing one skill or multiple skill subdirectories
+     * @return list of precheck results
+     * @throws NacosException if zip parsing fails entirely
      */
-    List<SkillUploadPrecheckResult> batchPrecheckUploadSkill(
-        List<SkillUploadPrecheckRequest> requests) throws NacosException;
+    List<SkillUploadPrecheckResult> precheckUploadSkillFromZip(String namespaceId,
+        byte[] zipBytes) throws NacosException;
     
     /**
      * Batch upload multiple skills from a single zip archive. The zip must contain one-level subdirectories,
-     * each with its own SKILL.md. Uses best-effort strategy: processes all skills individually, returning
-     * succeeded and failed lists.
+     * each with its own SKILL.md. Uses best-effort strategy and returns one result for each skill.
      *
      * @param namespaceId namespace ID
      * @param zipBytes zip file bytes containing multiple skill subdirectories
      * @param overwrite whether to overwrite existing drafts
-     * @return batch upload result with succeeded and failed skill names
+     * @return batch upload result with per-skill results
      * @throws NacosException if zip parsing fails entirely (e.g. invalid format, no SKILL.md found)
      */
     BatchUploadResult batchUploadSkillsFromZip(String namespaceId, byte[] zipBytes,
@@ -323,18 +321,6 @@ public interface SkillOperationService {
     void updateScope(String namespaceId, String name, String scope) throws NacosException;
     
     // ========== Client APIs ==========
-    
-    /**
-     * Search skills for runtime client usage. Only returns enabled skills that have at least one online version.
-     * Returns only name and description for client consumption.
-     *
-     * @param namespaceId namespace ID
-     * @param keyword keyword (optional)
-     * @param pageNo page number
-     * @param pageSize page size
-     */
-    Page<SkillBasicInfo> searchSkills(String namespaceId, String keyword, int pageNo, int pageSize)
-        throws NacosException;
     
     /**
      * Query skill for runtime client usage. Priority: label > version > latest(label).

@@ -74,6 +74,20 @@ cannot establish a running connection within the configured retry budget, it may
 continue with asynchronous reconnect, but public SDK calls must surface
 connection unavailability according to their domain contract.
 
+A domain client may suspend background initial reconnect only while the client
+has never connected and remains `STARTING`, and only when all of the following
+hold:
+
+- the domain contract defines an available alternate transport;
+- that alternate transport has completed at least one authoritative request;
+- failed asynchronous initial reconnects have reached the domain probe budget.
+
+Suspension suppresses new initial reconnect signals and the active initial
+reconnect loop; it does not pretend that the client is `RUNNING` or
+`UNHEALTHY`. Explicit gRPC mode, a connection already in `UNHEALTHY`, and an
+explicit shared-gRPC demand from another feature must keep or resume reconnect.
+Public requests must not wait for this background probe to finish.
+
 Reconnect can be triggered by:
 
 - request stream error or completion;
@@ -111,6 +125,32 @@ operations. A domain client may use HTTP when:
 HTTP fallback must be explicit in the domain client. A failed gRPC request must
 not automatically mutate resource state through HTTP unless the domain client
 has defined that fallback.
+
+The shared synchronous Apache HTTP adapter must buffer response entity bytes
+without an intermediate string conversion. These are the entity bytes supplied
+by Apache after its existing content decoding, not HTTP framing or compressed
+wire bytes. Missing charset declarations must not corrupt UTF-8 JSON or binary
+data. Content consumers retain their existing parsing and charset policies.
+The adapter must preserve the existing status and header representation and
+consume and close the network response within the response-handler lifecycle,
+including when response processing fails.
+
+### 5.1 HTTP Request ID
+
+The Java Client SDK's shared, Config, and Naming HTTP clients, including AI
+requests using those clients, must generate a UUID in the `Nacos-Request-Id`
+header for each request execution. SDK retries, failover attempts, and subsequent
+long polls receive new IDs; replays internal to the underlying HTTP implementation
+may retain the same ID. The SDK owns this header and replaces any existing value
+before sending, without modifying the caller's headers or shared `Header.EMPTY`.
+
+The request ID is for request correlation, not client identity, authentication, or
+idempotency. Existing `RequestId`, Client Id, and `Request-Module` headers retain
+their behavior. Servers read the header according to the
+[request context spec](../design/foundation-request-context-spec.md). Clients do
+not depend on server support or response echoing, so older servers remain
+compatible. Direct HTTP connections to external OIDC providers are outside this
+contract.
 
 ## 6. TLS
 

@@ -30,6 +30,9 @@ import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.model.Page;
 import com.alibaba.nacos.api.model.v2.Result;
 import com.alibaba.nacos.auth.annotation.Secured;
+import com.alibaba.nacos.config.server.auth.ConfigCloneHttpResourceParser;
+import com.alibaba.nacos.config.server.auth.ConfigExportHttpResourceParser;
+import com.alibaba.nacos.config.server.auth.ConfigNamespaceHttpResourceParser;
 import com.alibaba.nacos.common.utils.NamespaceUtil;
 import com.alibaba.nacos.common.utils.StringUtils;
 import com.alibaba.nacos.config.server.constant.Constants;
@@ -181,14 +184,18 @@ public class ConsoleConfigController {
      */
     @Since("3.0.0")
     @DeleteMapping("/batchDelete")
-    @Secured(action = ActionTypes.WRITE, signType = SignType.CONFIG, apiType = ApiType.CONSOLE_API)
+    @Secured(action = ActionTypes.WRITE, signType = SignType.CONFIG, apiType = ApiType.CONSOLE_API,
+        parser = ConfigNamespaceHttpResourceParser.class)
     public Result<Boolean> batchDeleteConfigs(HttpServletRequest request,
-        @RequestParam(value = "ids") List<Long> ids)
+        @RequestParam(value = "ids") List<Long> ids,
+        @RequestParam(value = "namespaceId", required = false) String namespaceId)
         throws NacosException {
         String clientIp = RequestUtil.getRemoteIp(request);
         String srcUser = RequestUtil.getSrcUserName(request);
+        String requestNamespaceId = NamespaceUtil.processNamespaceParameter(namespaceId);
         
-        return Result.success(configProxy.batchDeleteConfigs(ids, clientIp, srcUser));
+        return Result.success(configProxy.batchDeleteConfigs(ids, requestNamespaceId, clientIp,
+            srcUser));
     }
     
     /**
@@ -304,8 +311,8 @@ public class ConsoleConfigController {
      */
     @Since("3.0.0")
     @GetMapping("/listener/ip")
-    @Secured(resource = Constants.LISTENER_CONTROLLER_PATH, action = ActionTypes.READ,
-        signType = SignType.CONFIG, apiType = ApiType.CONSOLE_API)
+    @Secured(action = ActionTypes.READ, signType = SignType.CONFIG,
+        apiType = ApiType.CONSOLE_API)
     public Result<ConfigListenerInfo> getAllSubClientConfigByIp(@RequestParam("ip") String ip,
         @RequestParam(value = "all", required = false) boolean all,
         @RequestParam(value = "namespaceId", required = false) String namespaceId,
@@ -327,7 +334,8 @@ public class ConsoleConfigController {
      */
     @Since("3.0.0")
     @GetMapping("/export2")
-    @Secured(action = ActionTypes.READ, signType = SignType.CONFIG, apiType = ApiType.CONSOLE_API)
+    @Secured(action = ActionTypes.READ, signType = SignType.CONFIG, apiType = ApiType.CONSOLE_API,
+        parser = ConfigExportHttpResourceParser.class)
     public ResponseEntity<byte[]> exportConfigV2(ConfigFormV3 configForm,
         @RequestParam(value = "ids", required = false) List<Long> ids) throws Exception {
         configForm.blurSearchValidate();
@@ -355,7 +363,8 @@ public class ConsoleConfigController {
      */
     @Since("3.0.0")
     @PostMapping("/import")
-    @Secured(action = ActionTypes.WRITE, signType = SignType.CONFIG, apiType = ApiType.CONSOLE_API)
+    @Secured(action = ActionTypes.WRITE, signType = SignType.CONFIG, apiType = ApiType.CONSOLE_API,
+        parser = ConfigNamespaceHttpResourceParser.class)
     public Result<Map<String, Object>> importAndPublishConfig(HttpServletRequest request,
         @RequestParam(required = false) String srcUser,
         @RequestParam(value = "namespaceId", required = false) String namespaceId,
@@ -379,7 +388,8 @@ public class ConsoleConfigController {
      *
      * @param request         HTTP servlet request.
      * @param srcUser         Source user string value.
-     * @param namespaceId     Namespace string value.
+     * @param namespaceId     Source namespace string value.
+     * @param targetNamespaceId Target namespace string value.
      * @param configBeansList List of configuration beans.
      * @param policy          Policy model.
      * @return Result containing a map of the clone status.
@@ -388,24 +398,28 @@ public class ConsoleConfigController {
     @Since("3.0.0")
     @PostMapping("/clone")
     @Secured(action = ActionTypes.WRITE, signType = SignType.CONFIG, apiType = ApiType.CONSOLE_API,
+        parser = ConfigCloneHttpResourceParser.class,
         tags = {
             com.alibaba.nacos.plugin.auth.constant.Constants.Tag.SECURED_SPECIAL_TAGS})
     public Result<Map<String, Object>> cloneConfig(HttpServletRequest request,
         @RequestParam(required = false) String srcUser,
-        @RequestParam(value = "targetNamespaceId") String namespaceId,
+        @RequestParam(value = "namespaceId", required = false) String namespaceId,
+        @RequestParam(value = "targetNamespaceId") String targetNamespaceId,
         @RequestBody List<SameNamespaceCloneConfigBean> configBeansList,
         @RequestParam(value = "policy", defaultValue = "ABORT") SameConfigPolicy policy)
         throws NacosException {
         configBeansList.removeAll(Collections.singleton(null));
-        namespaceId = NamespaceUtil.processNamespaceParameter(namespaceId);
+        targetNamespaceId = NamespaceUtil.processNamespaceParameter(targetNamespaceId);
+        String sourceNamespaceId = StringUtils.isBlank(namespaceId)
+            ? targetNamespaceId : NamespaceUtil.processNamespaceParameter(namespaceId);
         if (StringUtils.isBlank(srcUser)) {
             srcUser = RequestUtil.getSrcUserName(request);
         }
         final String srcIp = RequestUtil.getRemoteIp(request);
         String requestIpApp = RequestUtil.getAppName(request);
         
-        return configProxy.cloneConfig(srcUser, namespaceId, configBeansList, policy, srcIp,
-            requestIpApp);
+        return configProxy.cloneConfig(srcUser, sourceNamespaceId, targetNamespaceId,
+            configBeansList, policy, srcIp, requestIpApp);
     }
     
     /**
@@ -418,7 +432,8 @@ public class ConsoleConfigController {
      */
     @Since("3.0.0")
     @DeleteMapping("/beta")
-    @Secured(action = ActionTypes.WRITE, signType = SignType.CONFIG)
+    @Secured(action = ActionTypes.WRITE, signType = SignType.CONFIG,
+        apiType = ApiType.CONSOLE_API)
     public Result<Boolean> stopBeta(HttpServletRequest httpServletRequest, ConfigFormV3 configForm)
         throws NacosException {
         configForm.validate();
@@ -446,7 +461,8 @@ public class ConsoleConfigController {
      */
     @Since("3.0.0")
     @GetMapping("/beta")
-    @Secured(action = ActionTypes.READ, signType = SignType.CONFIG)
+    @Secured(action = ActionTypes.READ, signType = SignType.CONFIG,
+        apiType = ApiType.CONSOLE_API)
     public Result<ConfigGrayInfo> queryBeta(ConfigFormV3 configForm) throws NacosException {
         configForm.validate();
         String dataId = configForm.getDataId();

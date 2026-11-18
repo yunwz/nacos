@@ -51,6 +51,15 @@ change event. Deleting a gray config removes only the named gray variant.
 Deleting a missing config is tolerated by compatibility surfaces, but new
 management workflows should avoid presenting a missing delete as evidence that a
 resource previously existed.
+Batch delete by storage ID is a management operation. The request must carry or
+default a normalized `namespaceId`, and implementations may delete only matching
+IDs inside that namespace. Missing IDs and IDs that belong to another namespace
+may be skipped, but configs in other namespaces must not be deleted.
+
+The `ids` parameter on current batch-delete APIs is a deprecated compatibility
+selector and is pending removal. Future batch-delete APIs should select configs
+by `namespaceId`, `groupName`, and `dataId`, or by an explicit list of those
+identity tuples, instead of exposing persistence IDs.
 
 ## 3. Runtime Query Chain
 
@@ -79,11 +88,28 @@ The effective semantic order is:
    and config type.
 8. Resolve the response content type from the config type, defaulting to text.
 
+Existing formal config content may be empty or whitespace-only. Queries must
+return that content unchanged with its metadata. Only a `null` content read
+denotes missing formal content; blank-content checks must not determine existence.
+
 Runtime query must use cached and dumped content rather than broad persistence
 queries. The shared dump and cache boundary is defined by the
 [Persistence And Dump Spec](../design/foundation-persistence-dump-spec.md).
 
+If disk-path safety rejects a Config identity during a synchronous runtime
+query, HTTP APIs must return a 400 parameter-validation response and RPC APIs
+must expose the corresponding invalid-parameter error code. The rejection must
+not be converted to a 500 server error.
+
 ## 4. Admin Query
+
+V3 Admin and Console Config detail responses include `schema` as optional text
+from the stored Config metadata. The response preserves stored text, including
+an explicitly stored empty string. When no value is stored, the model value is
+null and the response may omit the field under the default serialization rules.
+This field does not change runtime Config content or validation. Gray detail
+models inherit the field with a null value because gray storage does not retain
+schema metadata; their responses may also omit the field.
 
 Admin query returns Config detail for management users. When the stored config
 is encrypted, Admin query decrypts the content before returning the detail
@@ -113,14 +139,37 @@ Import, export, and clone are management operations:
   same-config policy, and publishes change events for successful writes;
 - clone copies selected configs into a target namespace and optionally target
   group or target dataId;
+- clone source config IDs must be resolved only in the normalized source
+  namespace, while cloned configs are written to the normalized target namespace;
+  omitted source namespace defaults to the target namespace for same-namespace
+  compatibility;
 - import and export must preserve config type, description, app name, group,
   dataId, content, and encryption semantics.
+- when export selects configs by storage ID, the exported result must be scoped
+  to the normalized request `namespaceId`.
+- the `ids` selector on current export APIs is a deprecated compatibility path
+  and is pending removal; future export selection should be based on
+  `namespaceId`, `groupName`, and `dataId` identity rather than persistence IDs.
 
 ## 7. Interface Rules
 
 | Surface | Rule |
 | --- | --- |
 | HTTP Open API | Query one known config through `/v3/client/cs/config`; no HTTP listen or broad management behavior. |
-| HTTP Admin API | CRUD, metadata, list/search, import, export, clone, beta query/delete, listener, capacity, metrics, and ops use `/v3/admin/cs/*`. |
+| HTTP Admin API | CRUD, metadata, list/search, import, export, clone, beta query/delete, listener, capacity, metrics, and ops use `/v3/admin/cs/*`; Admin clone uses `namespaceId` as target namespace and optional `sourceNamespaceId` as source namespace. |
+| HTTP Console API | Console clone uses `namespaceId` as source namespace and `targetNamespaceId` as target namespace; omitted `namespaceId` defaults source to target. |
 | gRPC API | Query, publish compatibility, remove compatibility, listen, fuzzy watch, and push messages must preserve the same Config identity and md5 semantics. |
 | Client SDK | Runtime query and listener APIs should be preferred for applications; broad management APIs belong to Maintainer SDK. |
+
+### Publish operation messages
+
+Ordinary and CAS publish APIs may accept optional `changeMessage` and handle
+inserts and updates identically, without checking whether the config is new.
+Console create and delete workflows have no message input. Delete, Beta, tag/gray,
+and rollback APIs are out of scope in this phase. Messages belong to the
+successful publish, not config description or content. Omitting the parameter
+preserves existing behavior; failed CAS records no message.
+See [Config Persistence And History Spec](config-persistence-history-spec.md#publish-operation-messages)
+for input rules (512 Unicode code points), JSON storage, history-detail
+display, plugin degradation, and acceptance scenarios. This is a target for
+review, not a claim that current APIs implement and validate this scope.

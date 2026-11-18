@@ -1,0 +1,260 @@
+/*
+ * Copyright 1999-2026 Alibaba Group Holding Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.alibaba.nacos.bootstrap;
+
+import com.alibaba.nacos.NacosServerBasicApplication;
+import com.alibaba.nacos.NacosServerWebApplication;
+import com.alibaba.nacos.airegistry.NacosAiRegistry;
+import com.alibaba.nacos.console.NacosConsole;
+import com.alibaba.nacos.common.executor.ThreadPoolManager;
+import com.alibaba.nacos.common.notify.NotifyCenter;
+import com.alibaba.nacos.core.listener.startup.NacosStartUpManager;
+import com.alibaba.nacos.sys.env.DeploymentType;
+import com.alibaba.nacos.sys.env.EnvUtil;
+import com.alibaba.nacos.sys.file.WatchFileCenter;
+import com.alibaba.nacos.sys.utils.ApplicationUtils;
+import org.springframework.aot.generate.ClassNameGenerator;
+import org.springframework.aot.hint.RuntimeHints;
+import org.springframework.aot.hint.MemberCategory;
+import org.springframework.aot.hint.TypeReference;
+import org.springframework.aot.nativex.FileNativeConfigurationWriter;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.SpringApplicationRunListener;
+import org.springframework.boot.WebApplicationType;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.context.aot.AbstractAotProcessor;
+import org.springframework.context.aot.ContextAotProcessor;
+import org.springframework.context.support.GenericApplicationContext;
+import org.springframework.javapoet.ClassName;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Properties;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.stream.Stream;
+
+/**
+ * Build-time multi-context AOT experiment. Run in a dedicated JVM with matching plugins/configuration.
+ */
+public final class NacosApplicationAotProcessor {
+    
+    /**
+     * The phases that have a generated initializer, as keyed in the phase index.
+     */
+    private static final List<String> PHASES = List.of("core", "web", "console", "ai-registry");
+    
+    public static void main(String[] args) throws Exception {
+        Path output = Path.of(args[0]);
+        System.setProperty(AbstractAotProcessor.AOT_PROCESSING, "true");
+        DeploymentType deployment =
+            DeploymentType.getType(System.getProperty("nacos.deployment.type", "merged"));
+        EnvUtil.setDeploymentType(deployment);
+        List<GenericApplicationContext> contexts = new ArrayList<>();
+        Properties initializers = new Properties();
+        try {
+            if (deployment == DeploymentType.CONSOLE) {
+                GenericApplicationContext console =
+                    capture("console", new SpringApplicationBuilder(NacosConsole.class));
+                contexts.add(console);
+                initializers.putAll(
+                    NacosAotManifest.snapshot(console.getEnvironment(), console.getClassLoader()));
+                initializers.setProperty("console",
+                    new PhaseProcessor(NacosConsole.class, output, "console").generate(console));
+            } else if (deployment == DeploymentType.SERVER || deployment == DeploymentType.MERGED) {
+                GenericApplicationContext core =
+                    capture("core", new SpringApplicationBuilder(NacosServerBasicApplication.class)
+                        .web(WebApplicationType.NONE));
+                contexts.add(core);
+                initializers.putAll(
+                    NacosAotManifest.snapshot(core.getEnvironment(), core.getClassLoader()));
+                initializers.setProperty("core",
+                    new PhaseProcessor(NacosServerBasicApplication.class, output, "core")
+                        .generate(core));
+                GenericApplicationContext web = capture("web",
+                    new SpringApplicationBuilder(NacosServerWebApplication.class).parent(core));
+                contexts.add(web);
+                initializers.setProperty("web",
+                    new PhaseProcessor(NacosServerWebApplication.class, output, "web")
+                        .generate(web));
+                if (deployment == DeploymentType.MERGED) {
+                    GenericApplicationContext console = capture("console",
+                        new SpringApplicationBuilder(NacosConsole.class).parent(core));
+                    contexts.add(console);
+                    initializers.setProperty("console",
+                        new PhaseProcessor(NacosConsole.class, output, "console")
+                            .generate(console));
+                }
+                if (NacosAotManifest.hasAiRegistry(core.getEnvironment())) {
+                    GenericApplicationContext registry = capture("ai-registry",
+                        new SpringApplicationBuilder(NacosAiRegistry.class).parent(core));
+                    contexts.add(registry);
+                    initializers.setProperty("ai-registry",
+                        new PhaseProcessor(NacosAiRegistry.class, output, "aiRegistry")
+                            .generate(registry));
+                }
+            } else {
+                throw new IllegalArgumentException("Unsupported deployment: " + deployment);
+            }
+            if (ApplicationUtils.isStarted()) {
+                throw new IllegalStateException("AOT processing must not mark the server ready");
+            }
+            Path index = output.resolve("resources/" + NacosAotInitializer.INDEX);
+            Files.createDirectories(index.getParent());
+            try (OutputStream stream = Files.newOutputStream(index)) {
+                initializers.store(stream, "Nacos multi-context AOT manifest");
+            }
+            RuntimeHints hints = new RuntimeHints();
+            hints.resources().registerPattern(NacosAotInitializer.INDEX);
+            registerInitializers(hints, initializers);
+            registerGeneratedClasses(hints, output);
+            for (String service : NacosAotManifest.SERVICES) {
+                hints.resources().registerPattern("META-INF/services/" + service);
+                for (String provider : initializers.getProperty("spi." + service).split(",")) {
+                    if (!provider.isEmpty()) {
+                        hints.reflection().registerType(TypeReference.of(provider),
+                            MemberCategory.INVOKE_DECLARED_CONSTRUCTORS);
+                    }
+                }
+            }
+            new FileNativeConfigurationWriter(output.resolve("resources"), "com.alibaba.nacos",
+                "nacos-bootstrap-aot").write(hints);
+            System.out.println("AOT_GENERATED deployment=" + deployment + ", datasource="
+                + initializers.getProperty("datasource")
+                + ", contexts=" + contexts.size());
+        } finally {
+            Collections.reverse(contexts);
+            for (GenericApplicationContext context : contexts) {
+                context.close();
+            }
+            WatchFileCenter.shutdown();
+            NotifyCenter.shutdown();
+            ThreadPoolManager.shutdown();
+            System.clearProperty(AbstractAotProcessor.AOT_PROCESSING);
+        }
+    }
+    
+    /**
+     * Register the generated phase initializers for reflection without a condition. Spring's own
+     * hints for them only apply once the application class has been initialized. The contexts here
+     * are built from class literals, which never initialize those classes, and the initializer is
+     * selected by name through the phase index, so in a Native Image the lookup would fail.
+     *
+     * @param hints the hints written next to the generated artifacts
+     * @param index the phase index holding the generated initializer class name of each phase
+     */
+    static void registerInitializers(RuntimeHints hints, Properties index) {
+        for (String phase : PHASES) {
+            String initializer = index.getProperty(phase);
+            if (initializer != null && !initializer.isEmpty()) {
+                hints.reflection().registerType(TypeReference.of(initializer),
+                    MemberCategory.INVOKE_DECLARED_CONSTRUCTORS);
+            }
+        }
+    }
+    
+    /**
+     * Register every class that the AOT run generated directly as bytecode, which are the CGLIB
+     * subclasses of configuration classes, the class-based AOP proxies and their FastClass helpers.
+     * Spring's own hints cover only the constructors of some of them, while the runtime also reads
+     * their static callback fields, invokes their callback setters and instantiates AOP proxies
+     * without calling a constructor.
+     *
+     * @param hints     the hints written next to the generated artifacts
+     * @param generated the AOT output directory that holds one directory per phase
+     * @throws IOException when the generated classes cannot be listed
+     */
+    static void registerGeneratedClasses(RuntimeHints hints, Path generated) throws IOException {
+        if (!Files.isDirectory(generated)) {
+            return;
+        }
+        List<Path> phases;
+        try (Stream<Path> children = Files.list(generated)) {
+            phases = children.filter(Files::isDirectory).sorted().toList();
+        }
+        for (Path phase : phases) {
+            Path classes = phase.resolve("classes");
+            if (!Files.isDirectory(classes)) {
+                continue;
+            }
+            List<Path> files;
+            try (Stream<Path> walk = Files.walk(classes)) {
+                files = walk.filter(file -> file.toString().endsWith(".class")).sorted().toList();
+            }
+            for (Path file : files) {
+                String name = classes.relativize(file).toString().replace(File.separatorChar, '.');
+                hints.reflection().registerType(
+                    TypeReference.of(name.substring(0, name.length() - ".class".length())),
+                    MemberCategory.INVOKE_DECLARED_CONSTRUCTORS,
+                    MemberCategory.INVOKE_DECLARED_METHODS, MemberCategory.ACCESS_DECLARED_FIELDS,
+                    MemberCategory.UNSAFE_ALLOCATED);
+            }
+        }
+    }
+    
+    private static GenericApplicationContext capture(String phase,
+        SpringApplicationBuilder builder) {
+        NacosStartUpManager.start(phase);
+        try {
+            SpringApplication.withHook(
+                application -> new SpringApplicationRunListener() {
+                    
+                    @Override
+                    public void contextLoaded(ConfigurableApplicationContext context) {
+                        throw new SpringApplication.AbandonedRunException(context);
+                    }
+                }, () -> builder.run());
+        } catch (SpringApplication.AbandonedRunException captured) {
+            return (GenericApplicationContext) captured.getApplicationContext();
+        }
+        throw new IllegalStateException("Build-time context was unexpectedly refreshed");
+    }
+    
+    private static final class PhaseProcessor extends ContextAotProcessor {
+        
+        private final String phase;
+        
+        private PhaseProcessor(Class<?> applicationClass, Path output, String phase) {
+            super(applicationClass, Settings.builder()
+                .sourceOutput(output.resolve(phase + "/sources"))
+                .resourceOutput(output.resolve(phase + "/resources"))
+                .classOutput(output.resolve(phase + "/classes"))
+                .groupId("com.alibaba.nacos").artifactId("nacos-aot-poc-" + phase).build());
+            this.phase = phase;
+        }
+        
+        private String generate(GenericApplicationContext context) {
+            // Keep the processed parent alive until the child has been processed as well.
+            return performAotProcessing(context).canonicalName();
+        }
+        
+        @Override
+        protected ClassNameGenerator createClassNameGenerator() {
+            return new ClassNameGenerator(ClassName.get(getApplicationClass()), phase);
+        }
+        
+        @Override
+        protected GenericApplicationContext prepareApplicationContext(Class<?> applicationClass) {
+            throw new UnsupportedOperationException("Use the captured context");
+        }
+    }
+}

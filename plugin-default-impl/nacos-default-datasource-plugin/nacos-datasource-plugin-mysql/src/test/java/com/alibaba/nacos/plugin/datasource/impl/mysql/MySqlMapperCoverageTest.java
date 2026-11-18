@@ -111,16 +111,14 @@ class MySqlMapperCoverageTest {
         
         context.putWhereParameter(FieldConstant.TYPE, new String[] {"yaml", "properties"});
         assertResult(mapper.findConfigInfoLike4PageFetchRows(context),
-            "SELECT a.id,a.data_id,a.group_id,a.tenant_id,a.app_name,a.content,a.md5,"
-                + "a.encrypted_data_key,a.type,a.c_desc,a.gmt_modified,"
-                + "GROUP_CONCAT(b.tag_name SEPARATOR ',') as config_tags FROM "
-                + "(SELECT id,data_id,group_id,tenant_id,app_name,content,md5,"
-                + "encrypted_data_key,type,c_desc,gmt_modified FROM config_info "
+            "SELECT c.id,c.data_id,c.group_id,c.tenant_id,c.app_name,c.content,c.md5,"
+                + "c.encrypted_data_key,c.type,c.c_desc,c.gmt_modified,p.config_tags "
+                + "FROM (SELECT a.id,GROUP_CONCAT(b.tag_name SEPARATOR ',') as config_tags FROM "
+                + "(SELECT id FROM config_info "
                 + "WHERE tenant_id LIKE ? AND data_id LIKE ? AND group_id LIKE ? "
                 + "AND app_name = ? AND content LIKE ? AND type IN (?, ?) "
                 + "ORDER BY id LIMIT 3,7) a LEFT JOIN config_tags_relation b ON a.id=b.id "
-                + "GROUP BY a.id,a.data_id,a.group_id,a.tenant_id,a.app_name,a.content,"
-                + "a.md5,a.encrypted_data_key,a.type,a.c_desc,a.gmt_modified",
+                + "GROUP BY a.id) p JOIN config_info c ON c.id=p.id",
             tenantId, dataId, groupId, appName, content, "yaml", "properties");
     }
     
@@ -155,8 +153,8 @@ class MySqlMapperCoverageTest {
             "SELECT nid,data_id,group_id,tenant_id,app_name,src_ip,src_user,op_type,ext_info,"
                 + "publish_type,gray_name,gmt_create,gmt_modified FROM his_config_info "
                 + "WHERE data_id = ? AND group_id = ? AND tenant_id = ? ORDER BY nid DESC "
-                + "LIMIT 3,7",
-            dataId, groupId, tenantId);
+                + "LIMIT ?,?",
+            dataId, groupId, tenantId, 3, 7);
         
         ConfigInfoGrayMapperByMySql grayMapper = new ConfigInfoGrayMapperByMySql();
         assertEquals(DataSourceConstant.MYSQL, grayMapper.getDataSource());
@@ -164,7 +162,8 @@ class MySqlMapperCoverageTest {
         assertEquals(TableConstant.CONFIG_INFO_GRAY, grayMapper.getTableName());
         assertResult(grayMapper.findAllConfigInfoGrayForDumpAllFetchRows(context),
             "SELECT id,data_id,group_id,tenant_id,gray_name,gray_rule,app_name,content,"
-                + "md5,gmt_modified FROM config_info_gray ORDER BY id LIMIT 3,7");
+                + "md5,gmt_modified FROM config_info_gray ORDER BY id LIMIT ?,?",
+            3, 7);
         
     }
     

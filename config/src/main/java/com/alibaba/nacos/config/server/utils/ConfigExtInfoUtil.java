@@ -19,6 +19,7 @@ package com.alibaba.nacos.config.server.utils;
 import com.alibaba.nacos.common.utils.StringUtils;
 import com.alibaba.nacos.config.server.constant.Constants;
 import com.alibaba.nacos.config.server.model.ConfigAllInfo;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -51,7 +52,67 @@ public class ConfigExtInfoUtil {
         EXTRA_INFO_KEYS_MAPPING.put("schema", "c_schema");
     }
     
+    /**
+     * Attach the current operation message without replacing snapshot metadata.
+     *
+     * @param extInfo snapshot extension JSON
+     * @param changeMessage current operation message
+     * @return extension JSON
+     */
+    public static String withChangeMessage(String extInfo, String changeMessage) {
+        if (changeMessage == null) {
+            return extInfo;
+        }
+        try {
+            JsonNode parsed = StringUtils.isBlank(extInfo) ? OBJECT_MAPPER.createObjectNode()
+                : OBJECT_MAPPER.readTree(extInfo);
+            if (parsed == null || !parsed.isObject()) {
+                return extInfo;
+            }
+            ObjectNode node = (ObjectNode) parsed;
+            node.put("change_message", changeMessage);
+            return OBJECT_MAPPER.writeValueAsString(node);
+        } catch (JsonProcessingException ex) {
+            return extInfo;
+        }
+    }
+    
+    /**
+     * Read the selected operation's message, tolerating legacy history extensions.
+     *
+     * @param extInfo history extension JSON
+     * @return message, or null for absent or invalid extensions
+     */
+    public static String getChangeMessage(String extInfo) {
+        if (StringUtils.isBlank(extInfo)) {
+            return null;
+        }
+        try {
+            JsonNode node = OBJECT_MAPPER.readTree(extInfo);
+            JsonNode message = node == null ? null : node.get("change_message");
+            return message != null && message.isTextual() ? message.textValue() : null;
+        } catch (JsonProcessingException ex) {
+            return null;
+        }
+    }
+    
     private ConfigExtInfoUtil() {
+    }
+    
+    /**
+     * Read schema text from the selected history record's extension.
+     */
+    public static String getSchemaFromExtInfo(String extInfo) {
+        if (StringUtils.isBlank(extInfo)) {
+            return null;
+        }
+        try {
+            JsonNode schema = OBJECT_MAPPER.readTree(extInfo).path("c_schema");
+            return schema.isTextual() ? schema.textValue() : null;
+        } catch (JsonProcessingException ex) {
+            LOGGER.warn("Failed to parse schema from config history extension");
+            return null;
+        }
     }
     
     /**

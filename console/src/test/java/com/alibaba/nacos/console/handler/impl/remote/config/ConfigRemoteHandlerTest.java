@@ -22,8 +22,10 @@ import com.alibaba.nacos.api.config.model.ConfigGrayInfo;
 import com.alibaba.nacos.api.config.model.ConfigListenerInfo;
 import com.alibaba.nacos.api.config.model.SameConfigPolicy;
 import com.alibaba.nacos.api.exception.NacosException;
+import com.alibaba.nacos.api.exception.api.NacosApiException;
 import com.alibaba.nacos.api.model.Page;
 import com.alibaba.nacos.api.model.v2.Result;
+import com.alibaba.nacos.api.model.v2.ErrorCode;
 import com.alibaba.nacos.config.server.controller.parameters.SameNamespaceCloneConfigBean;
 import com.alibaba.nacos.config.server.model.ConfigRequestInfo;
 import com.alibaba.nacos.config.server.model.form.ConfigForm;
@@ -141,6 +143,7 @@ class ConfigRemoteHandlerTest extends AbstractRemoteHandlerTest {
         configForm.setGroup("group");
         configForm.setNamespaceId("namespaceId");
         configForm.setContent("content");
+        configForm.setChangeMessage("x".repeat(513));
         ConfigRequestInfo configRequestInfo = new ConfigRequestInfo();
         configRequestInfo.setBetaIps("127.0.0.1");
         when(configMaintainerService.publishBetaConfig(eq("dataId"), eq("group"), eq("namespaceId"),
@@ -159,9 +162,10 @@ class ConfigRemoteHandlerTest extends AbstractRemoteHandlerTest {
     
     @Test
     void batchDeleteConfigs() throws NacosException {
-        when(configMaintainerService.deleteConfigs(any())).thenReturn(true);
+        when(configMaintainerService.deleteConfigs(any(), eq("namespaceId"))).thenReturn(true);
         assertTrue(
-            configRemoteHandler.batchDeleteConfigs(Collections.singletonList(1L), null, null));
+            configRemoteHandler.batchDeleteConfigs(Collections.singletonList(1L), "namespaceId",
+                null, null));
     }
     
     @Test
@@ -232,10 +236,11 @@ class ConfigRemoteHandlerTest extends AbstractRemoteHandlerTest {
         SameNamespaceCloneConfigBean sameNamespaceCloneConfigBean =
             new SameNamespaceCloneConfigBean();
         sameNamespaceCloneConfigBean.setCfgId(1L);
-        when(configMaintainerService.cloneConfig(eq("namespaceId"), any(), eq("srcUser"),
-            eq(SameConfigPolicy.OVERWRITE))).thenReturn(Collections.singletonMap("1", 1));
+        when(configMaintainerService.cloneConfig(eq("sourceNamespaceId"), eq("targetNamespaceId"),
+            any(), eq("srcUser"), eq(SameConfigPolicy.OVERWRITE))).thenReturn(
+                Collections.singletonMap("1", 1));
         Result<Map<String, Object>> actual =
-            configRemoteHandler.cloneConfig("srcUser", "namespaceId",
+            configRemoteHandler.cloneConfig("srcUser", "sourceNamespaceId", "targetNamespaceId",
                 Collections.singletonList(sameNamespaceCloneConfigBean), SameConfigPolicy.OVERWRITE,
                 "srcIp",
                 "requestIpApp");
@@ -278,4 +283,43 @@ class ConfigRemoteHandlerTest extends AbstractRemoteHandlerTest {
         assertThrows(NacosException.class,
             () -> configRemoteHandler.queryBetaConfig("dataId", "group", "namespaceId"));
     }
+    
+    @Test
+    void publishConfigForwardsOperationMessage() throws NacosException {
+        ConfigForm form = new ConfigForm();
+        form.setDataId("dataId");
+        form.setGroup("group");
+        form.setNamespaceId("namespaceId");
+        form.setContent("content");
+        form.setChangeMessage("current operation");
+        when(configMaintainerService.publishConfig("dataId", "group", "namespaceId", "content",
+            null, null, null, null, null, "current operation")).thenReturn(true);
+        assertTrue(configRemoteHandler.publishConfig(form, new ConfigRequestInfo()));
+    }
+    
+    @Test
+    void publishConfigRejectsOversizedMessageBeforeForwarding() {
+        ConfigForm form = new ConfigForm();
+        form.setChangeMessage("x".repeat(513));
+        NacosApiException error = assertThrows(NacosApiException.class,
+            () -> configRemoteHandler.publishConfig(form, new ConfigRequestInfo()));
+        assertEquals(400, error.getErrCode());
+        assertEquals(ErrorCode.PARAMETER_VALIDATE_ERROR.getCode(), error.getDetailErrCode());
+        Mockito.verifyNoInteractions(configMaintainerService);
+    }
+    
+    @Test
+    void publishConfigNormalizesBlankMessageBeforeForwarding() throws NacosException {
+        ConfigForm form = new ConfigForm();
+        form.setDataId("dataId");
+        form.setGroup("group");
+        form.setNamespaceId("namespaceId");
+        form.setContent("content");
+        form.setChangeMessage(" \t\n\u00a0\u3000");
+        when(configMaintainerService.publishConfig("dataId", "group", "namespaceId", "content",
+            null, null, null, null, null)).thenReturn(true);
+        assertTrue(configRemoteHandler.publishConfig(form, new ConfigRequestInfo()));
+        assertNull(form.getChangeMessage());
+    }
+    
 }

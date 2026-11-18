@@ -18,6 +18,7 @@ package com.alibaba.nacos.client.config.impl;
 
 import com.alibaba.nacos.api.common.Constants;
 import com.alibaba.nacos.api.exception.NacosException;
+import com.alibaba.nacos.client.remote.RequestIdHttpClientRequestInterceptor;
 import com.alibaba.nacos.client.utils.LogUtils;
 import com.alibaba.nacos.client.utils.ParamUtil;
 import com.alibaba.nacos.common.http.AbstractHttpClientFactory;
@@ -31,7 +32,7 @@ import com.alibaba.nacos.common.http.param.Header;
 import com.alibaba.nacos.common.lifecycle.Closeable;
 import com.alibaba.nacos.common.model.RequestHttpEntity;
 import com.alibaba.nacos.common.utils.ExceptionUtil;
-import com.alibaba.nacos.common.utils.JacksonUtils;
+import com.alibaba.nacos.api.utils.json.JsonUtils;
 import com.alibaba.nacos.common.utils.MD5Utils;
 import org.slf4j.Logger;
 
@@ -115,6 +116,13 @@ public class ConfigHttpClientManager implements Closeable {
     private static class ConfigHttpClientFactory extends AbstractHttpClientFactory {
         
         @Override
+        public NacosRestTemplate createNacosRestTemplate() {
+            NacosRestTemplate template = super.createNacosRestTemplate();
+            template.getInterceptors().add(new RequestIdHttpClientRequestInterceptor());
+            return template;
+        }
+        
+        @Override
         protected HttpClientConfig buildHttpClientConfig() {
             return HttpClientConfig.builder().setConTimeOutMillis(CON_TIME_OUT_MILLIS)
                 .setReadTimeOutMillis(READ_TIME_OUT_MILLIS).build();
@@ -136,7 +144,7 @@ public class ConfigHttpClientManager implements Closeable {
         public boolean isIntercept(URI uri, String httpMethod,
             RequestHttpEntity requestHttpEntity) {
             final String body = requestHttpEntity.isEmptyBody() ? ""
-                : JacksonUtils.toJson(requestHttpEntity.getBody());
+                : JsonUtils.toJson(requestHttpEntity.getBody());
             return Limiter.isLimit(MD5Utils.md5Hex(uri + body, Constants.ENCODE));
         }
         
@@ -165,11 +173,6 @@ public class ConfigHttpClientManager implements Closeable {
         @Override
         public int getStatusCode() {
             return NacosException.CLIENT_OVER_THRESHOLD;
-        }
-        
-        @Override
-        public String getStatusText() {
-            return null;
         }
         
         @Override

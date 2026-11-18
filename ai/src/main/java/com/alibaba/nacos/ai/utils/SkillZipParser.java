@@ -28,19 +28,28 @@ import com.alibaba.nacos.common.utils.StringUtils;
 import com.alibaba.nacos.sys.env.EnvUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.yaml.snakeyaml.LoaderOptions;
+import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.constructor.SafeConstructor;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
 import org.apache.commons.compress.archivers.zip.ZipArchiveInputStream;
 
@@ -101,6 +110,10 @@ public class SkillZipParser {
      */
     static final int DEFAULT_MAX_UNCOMPRESSED_SIZE_MB = 50;
     
+    static final int DEFAULT_MAX_SEED_ARCHIVE_ENTRIES = 2048;
+    
+    static final long DEFAULT_MAX_SEED_UNCOMPRESSED_BYTES = 50L * 1024L * 1024L;
+    
     /**
      * Property key for overriding {@link #DEFAULT_MAX_UPLOAD_SIZE_MB}. The value is in megabytes
      * and applies to the raw compressed skill ZIP before parsing. Non-positive values are ignored.
@@ -121,6 +134,15 @@ public class SkillZipParser {
     
     private static final Pattern YAML_FRONT_MATTER = Pattern.compile(
         "^---\\s*\\n(.*?)\\n---\\s*\\n(.*)$", Pattern.DOTALL);
+    
+    private static final Pattern YAML_BLOCK_SCALAR =
+        Pattern.compile("[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:\\s+#.*)?");
+    
+    private static final Pattern SEED_FRONT_MATTER =
+        Pattern.compile("^---\\s*\\n(.*?)\\n---\\s*\\n", Pattern.DOTALL);
+    
+    private static final Pattern SEED_NAME = Pattern.compile(
+        "(?m)^name:\\s*(?:\"([^\"]+)\"|'([^']+)'|([^\\n#]+))\\s*$");
     
     /**
      * Parse YAML front matter map from full SKILL.md content.
@@ -268,8 +290,8 @@ public class SkillZipParser {
      *
      * @param zipBytes zip file bytes
      * @param namespaceId namespace ID
-     * @return list of parsed skills (at least one element)
-     * @throws NacosApiException if parsing failed, zip exceeds size limit, or no SKILL.md found
+     * @return parsed skills and per-directory failures
+     * @throws NacosApiException if the archive cannot be read or exceeds a size limit
      */
     public static MultiSkillParseResult parseMultipleSkillsFromZip(byte[] zipBytes,
         String namespaceId) throws NacosApiException {
@@ -302,9 +324,10 @@ public class SkillZipParser {
             }
             
             if (allSkillMdEntries.isEmpty()) {
-                throw new NacosApiException(NacosApiException.INVALID_PARAM,
-                    ErrorCode.PARAMETER_VALIDATE_ERROR,
-                    "SKILL.md file not found in zip");
+                MultiSkillParseResult result = new MultiSkillParseResult();
+                result.addFailure("unknown", "", "SKILL.md file not found in zip",
+                    ParseFailureType.NOT_A_SKILL);
+                return result;
             }
             List<ZipEntryData> skillMdEntries =
                 filterNestedSkillMdEntries(allSkillMdEntries);
@@ -313,7 +336,11 @@ public class SkillZipParser {
             // are regular resources referenced by the root descriptor.
             if (containsRootSkillMdEntry(skillMdEntries)) {
                 MultiSkillParseResult result = new MultiSkillParseResult();
-                result.addSkill(parseSkillFromZip(zipBytes, namespaceId));
+                try {
+                    result.addSkill(parseSkillFromZip(zipBytes, namespaceId), "");
+                } catch (NacosApiException e) {
+                    result.addFailure("unknown", "", e.getErrMsg());
+                }
                 return result;
             }
             
@@ -360,8 +387,9 @@ public class SkillZipParser {
             
             // Record warnings for directories without SKILL.md
             for (String dir : nonSkillDirs) {
-                parseResult.addFailure(extractFolderName(dir),
-                    "SKILL.md not found in this folder, skipped");
+                parseResult.addFailure(extractFolderName(dir), dir,
+                    "SKILL.md not found in this folder, skipped",
+                    ParseFailureType.NOT_A_SKILL);
             }
             for (ZipEntryData skillMdEntry : skillMdEntries) {
                 String skillMdPath = skillMdEntry.name;
@@ -371,7 +399,7 @@ public class SkillZipParser {
                     String skillMdContent =
                         stripBom(new String(skillMdEntry.data, StandardCharsets.UTF_8));
                     if (StringUtils.isBlank(skillMdContent)) {
-                        parseResult.addFailure(extractFolderName(prefix),
+                        parseResult.addFailure(extractFolderName(prefix), prefix,
                             "SKILL.md content is empty");
                         continue;
                     }
@@ -383,26 +411,201 @@ public class SkillZipParser {
                     Map<String, SkillResource> resources =
                         parseResources(scopedEntries, skill.getName(), SKILL_MD_FILE);
                     skill.setResource(resources);
-                    parseResult.addSkill(skill);
+                    parseResult.addSkill(skill, prefix);
                 } catch (Exception e) {
                     LOGGER.warn("Skipping invalid skill folder [{}]: {}", prefix, e.getMessage());
-                    parseResult.addFailure(extractFolderName(prefix), e.getMessage());
+                    parseResult.addFailure(extractFolderName(prefix), prefix, e.getMessage());
                 }
             }
             
-            // Intentionally allow returning when getSkills() is empty: callers handle
-            // the all-failed case as a batch result so users see the per-folder reasons
-            // instead of a generic 400 error. The earlier 'SKILL.md file not found in zip'
-            // throw still covers archives without any SKILL.md.
+            // Intentionally allow returning when getSkills() is empty so callers can expose
+            // per-folder failures instead of replacing them with a generic HTTP 400.
             return parseResult;
-        } catch (NacosApiException e) {
-            throw e;
         } catch (Exception e) {
             LOGGER.error("Failed to parse multi-skill zip file", e);
             throw new NacosApiException(NacosApiException.INVALID_PARAM,
                 ErrorCode.PARSING_DATA_FAILED,
                 "Failed to parse zip file: " + e.getMessage());
         }
+    }
+    
+    /**
+     * Parse the bundled seed archive into standalone Skill ZIP packages.
+     *
+     * @param inputStream bundled archive input stream
+     * @return standalone Skill packages
+     * @throws IOException if the archive cannot be read or violates a security limit
+     */
+    public static List<SkillPackage> parseSkillPackagesFromZip(InputStream inputStream)
+        throws IOException {
+        int maxEntries = Math.max(DEFAULT_MAX_SEED_ARCHIVE_ENTRIES, resolveMaxZipEntries());
+        long maxUncompressedBytes = Math.max(DEFAULT_MAX_SEED_UNCOMPRESSED_BYTES,
+            resolveMaxUncompressedBytes());
+        return parseSkillPackagesFromZip(inputStream, maxEntries, maxUncompressedBytes);
+    }
+    
+    static List<SkillPackage> parseSkillPackagesFromZip(InputStream inputStream, int maxEntries,
+        long maxUncompressedBytes) throws IOException {
+        Map<String, byte[]> entries =
+            readSeedArchiveEntries(inputStream, maxEntries, maxUncompressedBytes);
+        if (entries.isEmpty()) {
+            return Collections.emptyList();
+        }
+        
+        Set<String> roots = detectSkillRoots(entries.keySet());
+        if (roots.isEmpty()) {
+            return Collections.emptyList();
+        }
+        
+        Set<String> seenSkillNames = new HashSet<>();
+        List<SkillPackage> result = new ArrayList<>(roots.size());
+        for (String root : roots) {
+            String skillMdPath = buildRootPath(root, SKILL_MD_FILE);
+            byte[] skillMdBytes = entries.get(skillMdPath);
+            if (skillMdBytes == null) {
+                continue;
+            }
+            String skillName = extractSeedSkillName(skillMdBytes);
+            if (StringUtils.isBlank(skillName)) {
+                throw new IOException("Missing skill name in " + skillMdPath);
+            }
+            if (!seenSkillNames.add(skillName)) {
+                LOGGER.warn("Skip duplicate built-in skill name `{}` from archive path `{}`",
+                    skillName, root);
+                continue;
+            }
+            result.add(new SkillPackage(skillName, extractSeedFrom(root), root,
+                buildStandaloneSkillZip(entries, root, skillName)));
+        }
+        return result;
+    }
+    
+    private static Map<String, byte[]> readSeedArchiveEntries(InputStream inputStream,
+        int maxEntries, long maxUncompressedBytes) throws IOException {
+        Map<String, byte[]> result = new LinkedHashMap<>();
+        Set<String> seenEntryNames = new HashSet<>();
+        int entryCount = 0;
+        long totalSize = 0;
+        try (ZipArchiveInputStream zis =
+            new ZipArchiveInputStream(inputStream, StandardCharsets.UTF_8.name(), true, true)) {
+            ZipArchiveEntry entry;
+            byte[] buffer = new byte[8192];
+            while ((entry = zis.getNextEntry()) != null) {
+                entryCount++;
+                if (entryCount > maxEntries) {
+                    throw new IOException(
+                        "ZIP file contains too many entries (max " + maxEntries + ")");
+                }
+                String entryName = normalizeEntryName(entry.getName());
+                if (StringUtils.isNotBlank(entryName)) {
+                    SkillUtils.validatePathSafety(entryName);
+                    if (!seenEntryNames.add(entryName)) {
+                        throw new IOException(
+                            "ZIP file contains duplicate entry path: " + entryName);
+                    }
+                }
+                boolean shouldStore = !entry.isDirectory() && StringUtils.isNotBlank(entryName);
+                ByteArrayOutputStream out = shouldStore ? new ByteArrayOutputStream() : null;
+                int bytesRead;
+                while ((bytesRead = zis.read(buffer)) != -1) {
+                    totalSize += bytesRead;
+                    if (totalSize > maxUncompressedBytes) {
+                        throw new IOException("ZIP decompressed size exceeds limit ("
+                            + (maxUncompressedBytes / 1024 / 1024) + "MB)");
+                    }
+                    if (out != null) {
+                        out.write(buffer, 0, bytesRead);
+                    }
+                }
+                if (out != null) {
+                    result.put(entryName, out.toByteArray());
+                }
+            }
+        }
+        return result;
+    }
+    
+    private static Set<String> detectSkillRoots(Set<String> entryNames) {
+        Set<String> result = new TreeSet<>();
+        for (String entryName : entryNames) {
+            if (SKILL_MD_FILE.equals(entryName)) {
+                result.add("");
+                continue;
+            }
+            if (entryName.endsWith(SLASH + SKILL_MD_FILE)) {
+                result.add(entryName.substring(0, entryName.length() - SKILL_MD_FILE.length() - 1));
+            }
+        }
+        return result;
+    }
+    
+    private static String extractSeedSkillName(byte[] skillMdBytes) {
+        String content = new String(skillMdBytes, StandardCharsets.UTF_8);
+        Matcher frontMatterMatcher = SEED_FRONT_MATTER.matcher(content);
+        if (!frontMatterMatcher.find()) {
+            return null;
+        }
+        Matcher nameMatcher = SEED_NAME.matcher(frontMatterMatcher.group(1));
+        if (!nameMatcher.find()) {
+            return null;
+        }
+        for (int i = 1; i <= nameMatcher.groupCount(); i++) {
+            String candidate = nameMatcher.group(i);
+            if (StringUtils.isNotBlank(candidate)) {
+                return candidate.trim();
+            }
+        }
+        return null;
+    }
+    
+    private static byte[] buildStandaloneSkillZip(Map<String, byte[]> entries, String root,
+        String skillName) throws IOException {
+        List<String> paths = new ArrayList<>();
+        for (String entryName : entries.keySet()) {
+            if (isInSeedRoot(entryName, root)) {
+                paths.add(entryName);
+            }
+        }
+        Collections.sort(paths);
+        
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(out, StandardCharsets.UTF_8)) {
+            for (String path : paths) {
+                String relativePath = root.isEmpty() ? path : path.substring(root.length() + 1);
+                if (StringUtils.isBlank(relativePath)) {
+                    continue;
+                }
+                ZipEntry zipEntry = new ZipEntry(skillName + SLASH + relativePath);
+                zos.putNextEntry(zipEntry);
+                zos.write(entries.get(path));
+                zos.closeEntry();
+            }
+        }
+        return out.toByteArray();
+    }
+    
+    private static boolean isInSeedRoot(String entryName, String root) {
+        return root.isEmpty() || entryName.startsWith(root + SLASH);
+    }
+    
+    private static String buildRootPath(String root, String fileName) {
+        return root.isEmpty() ? fileName : root + SLASH + fileName;
+    }
+    
+    private static String extractSeedFrom(String sourcePath) {
+        if (StringUtils.isBlank(sourcePath)) {
+            return null;
+        }
+        String normalized = sourcePath;
+        while (normalized.endsWith(SLASH)) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        int idx = normalized.lastIndexOf('/');
+        if (idx <= 0) {
+            return null;
+        }
+        String from = normalized.substring(0, idx).trim();
+        return StringUtils.isBlank(from) ? null : from;
     }
     
     /**
@@ -496,6 +699,8 @@ public class SkillZipParser {
         final int maxEntries = resolveMaxZipEntries();
         final long maxUncompressedBytes = resolveMaxUncompressedBytes();
         List<ZipEntryData> result = new ArrayList<>();
+        Set<String> seenEntryNames = new HashSet<>();
+        int entryCount = 0;
         long totalSize = 0;
         try (ZipArchiveInputStream zis =
             new ZipArchiveInputStream(new ByteArrayInputStream(zipBytes),
@@ -503,20 +708,22 @@ public class SkillZipParser {
             ZipArchiveEntry entry;
             byte[] buffer = new byte[8192];
             while ((entry = zis.getNextEntry()) != null) {
-                if (entry.isDirectory()) {
-                    continue;
-                }
-                String name = entry.getName();
-                // Security: reject path traversal and absolute paths
-                SkillUtils.validatePathSafety(name);
-                if (isIgnoredZipMetadataEntry(name)) {
-                    continue;
-                }
-                if (result.size() >= maxEntries) {
+                entryCount++;
+                if (entryCount > maxEntries) {
                     throw new NacosRuntimeException(ErrorCode.PARAMETER_VALIDATE_ERROR.getCode(),
                         "ZIP file contains too many entries (max " + maxEntries + ")");
                 }
-                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                String name = entry.getName();
+                String normalizedName = normalizeEntryName(name);
+                SkillUtils.validatePathSafety(normalizedName);
+                if (StringUtils.isNotBlank(normalizedName)
+                    && !seenEntryNames.add(normalizedName)) {
+                    throw new NacosRuntimeException(ErrorCode.PARAMETER_VALIDATE_ERROR.getCode(),
+                        "ZIP file contains duplicate entry path: " + normalizedName);
+                }
+                boolean shouldStore = !entry.isDirectory()
+                    && StringUtils.isNotBlank(name) && !isIgnoredZipMetadataEntry(name);
+                ByteArrayOutputStream out = shouldStore ? new ByteArrayOutputStream() : null;
                 int n;
                 while ((n = zis.read(buffer)) != -1) {
                     totalSize += n;
@@ -526,10 +733,25 @@ public class SkillZipParser {
                             "ZIP decompressed size exceeds limit ("
                                 + (maxUncompressedBytes / 1024 / 1024) + "MB)");
                     }
-                    out.write(buffer, 0, n);
+                    if (out != null) {
+                        out.write(buffer, 0, n);
+                    }
                 }
-                result.add(new ZipEntryData(name, out.toByteArray()));
+                if (out != null) {
+                    result.add(new ZipEntryData(name, out.toByteArray()));
+                }
             }
+        }
+        return result;
+    }
+    
+    private static String normalizeEntryName(String entryName) {
+        if (entryName == null) {
+            return null;
+        }
+        String result = entryName.replace('\\', '/');
+        while (result.startsWith("./")) {
+            result = result.substring(2);
         }
         return result;
     }
@@ -718,6 +940,43 @@ public class SkillZipParser {
         return ResourceContentEncoder.isBinary(fileName);
     }
     
+    /**
+     * Standalone Skill package built from a bundled seed archive.
+     */
+    public static final class SkillPackage {
+        
+        private final String skillName;
+        
+        private final String from;
+        
+        private final String sourcePath;
+        
+        private final byte[] zipBytes;
+        
+        public SkillPackage(String skillName, String from, String sourcePath, byte[] zipBytes) {
+            this.skillName = skillName;
+            this.from = from;
+            this.sourcePath = sourcePath;
+            this.zipBytes = zipBytes == null ? new byte[0] : zipBytes;
+        }
+        
+        public String getSkillName() {
+            return skillName;
+        }
+        
+        public String getFrom() {
+            return from;
+        }
+        
+        public String getSourcePath() {
+            return sourcePath;
+        }
+        
+        public byte[] getZipBytes() {
+            return zipBytes;
+        }
+    }
+    
     private static final class ZipEntryData {
         
         final String name;
@@ -776,13 +1035,14 @@ public class SkillZipParser {
         return skill;
     }
     
-    private static Map<String, String> parseYamlFrontMatter(String yamlContent) {
+    static Map<String, String> parseYamlFrontMatter(String yamlContent) {
         Map<String, String> result = new HashMap<>(4);
-        String[] lines = yamlContent.split("\\n");
+        String[] lines = yamlContent.split("\\r?\\n", -1);
         String currentKey = null;
         StringBuilder currentValue = null;
         
-        for (String line : lines) {
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
             if (line.trim().isEmpty()) {
                 continue;
             }
@@ -814,6 +1074,19 @@ public class SkillZipParser {
             if (colonIndex > 0) {
                 String key = trimmedLine.substring(0, colonIndex).trim();
                 String value = trimmedLine.substring(colonIndex + 1).trim();
+                if (YAML_BLOCK_SCALAR.matcher(value).matches()) {
+                    StringBuilder scalar = new StringBuilder(value).append('\n');
+                    while (i + 1 < lines.length && (lines[i + 1].trim().isEmpty()
+                        || Character.isWhitespace(lines[i + 1].charAt(0)))) {
+                        scalar.append(lines[++i]).append('\n');
+                    }
+                    // Parse only the scalar to retain the existing representation of other fields.
+                    result.put(key,
+                        new Yaml(new SafeConstructor(new LoaderOptions())).load(scalar.toString()));
+                    currentKey = null;
+                    currentValue = null;
+                    continue;
+                }
                 value = parseYamlScalarValue(value);
                 currentKey = key;
                 currentValue = new StringBuilder(value);
@@ -946,10 +1219,13 @@ public class SkillZipParser {
         
         private final List<Skill> skills;
         
+        private final Map<Skill, String> skillEntryPaths;
+        
         private final List<ParseFailure> failures;
         
         public MultiSkillParseResult() {
             this.skills = new ArrayList<>();
+            this.skillEntryPaths = new HashMap<>();
             this.failures = new ArrayList<>();
         }
         
@@ -961,13 +1237,41 @@ public class SkillZipParser {
             return failures;
         }
         
+        public String getEntryPath(Skill skill) {
+            return skillEntryPaths.get(skill);
+        }
+        
         public void addSkill(Skill skill) {
+            addSkill(skill, "");
+        }
+        
+        public void addSkill(Skill skill, String entryPath) {
             this.skills.add(skill);
+            this.skillEntryPaths.put(skill, entryPath);
         }
         
         public void addFailure(String folder, String reason) {
-            this.failures.add(new ParseFailure(folder, reason));
+            addFailure(folder, folder, reason);
         }
+        
+        public void addFailure(String folder, String entryPath, String reason) {
+            addFailure(folder, entryPath, reason, ParseFailureType.INVALID_SKILL);
+        }
+        
+        public void addFailure(String folder, String entryPath, String reason,
+            ParseFailureType type) {
+            this.failures.add(new ParseFailure(folder, entryPath, reason, type));
+        }
+    }
+    
+    /**
+     * Type of a ZIP entry that could not be parsed as a Skill.
+     */
+    public enum ParseFailureType {
+        
+        NOT_A_SKILL,
+        
+        INVALID_SKILL
     }
     
     /**
@@ -977,19 +1281,34 @@ public class SkillZipParser {
         
         private final String folder;
         
+        private final String entryPath;
+        
         private final String reason;
         
-        public ParseFailure(String folder, String reason) {
+        private final ParseFailureType type;
+        
+        public ParseFailure(String folder, String entryPath, String reason,
+            ParseFailureType type) {
             this.folder = folder;
+            this.entryPath = entryPath;
             this.reason = reason;
+            this.type = type;
         }
         
         public String getFolder() {
             return folder;
         }
         
+        public String getEntryPath() {
+            return entryPath;
+        }
+        
         public String getReason() {
             return reason;
+        }
+        
+        public ParseFailureType getType() {
+            return type;
         }
     }
 }

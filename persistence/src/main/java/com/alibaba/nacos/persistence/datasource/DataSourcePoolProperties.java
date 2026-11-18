@@ -17,8 +17,6 @@
 package com.alibaba.nacos.persistence.datasource;
 
 import com.zaxxer.hikari.HikariDataSource;
-import org.springframework.boot.context.properties.bind.Bindable;
-import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.core.env.Environment;
 
 import java.util.concurrent.TimeUnit;
@@ -35,6 +33,8 @@ public class DataSourcePoolProperties {
     
     public static final long DEFAULT_CONNECTION_TIMEOUT = TimeUnit.SECONDS.toMillis(3L);
     
+    public static final long DEFAULT_EMBEDDED_CONNECTION_TIMEOUT = TimeUnit.SECONDS.toMillis(10L);
+    
     public static final long DEFAULT_VALIDATION_TIMEOUT = TimeUnit.SECONDS.toMillis(10L);
     
     public static final long DEFAULT_IDLE_TIMEOUT = TimeUnit.MINUTES.toMillis(10L);
@@ -45,10 +45,10 @@ public class DataSourcePoolProperties {
     
     private final HikariDataSource dataSource;
     
-    private DataSourcePoolProperties() {
+    private DataSourcePoolProperties(long defaultConnectionTimeout) {
         dataSource = new HikariDataSource();
         dataSource.setIdleTimeout(DEFAULT_IDLE_TIMEOUT);
-        dataSource.setConnectionTimeout(DEFAULT_CONNECTION_TIMEOUT);
+        dataSource.setConnectionTimeout(defaultConnectionTimeout);
         dataSource.setValidationTimeout(DEFAULT_VALIDATION_TIMEOUT);
         dataSource.setMaximumPoolSize(DEFAULT_MAX_POOL_SIZE);
         dataSource.setMinimumIdle(DEFAULT_MINIMUM_IDLE);
@@ -60,8 +60,21 @@ public class DataSourcePoolProperties {
      * @return new hikari config
      */
     public static DataSourcePoolProperties build(Environment environment) {
-        DataSourcePoolProperties result = new DataSourcePoolProperties();
-        Binder.get(environment).bind("db.pool.config", Bindable.ofInstance(result.getDataSource()));
+        return build(new DatasourceConfigResolver(environment));
+    }
+    
+    static DataSourcePoolProperties build(DatasourceConfigResolver configResolver) {
+        return build(configResolver, DEFAULT_CONNECTION_TIMEOUT);
+    }
+    
+    static DataSourcePoolProperties build(Environment environment, long defaultConnectionTimeout) {
+        return build(new DatasourceConfigResolver(environment), defaultConnectionTimeout);
+    }
+    
+    private static DataSourcePoolProperties build(DatasourceConfigResolver configResolver,
+        long defaultConnectionTimeout) {
+        DataSourcePoolProperties result = new DataSourcePoolProperties(defaultConnectionTimeout);
+        configResolver.bindPoolConfig(result.getDataSource());
         return result;
     }
     

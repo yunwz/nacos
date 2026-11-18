@@ -10,14 +10,15 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { AlertCircle, Check, Upload } from 'lucide-react';
 import { skillApi } from '@/api/skill';
 import {
   buildSkillBatchZipExcludingPrefixes,
-  parseSkillUploadEntries,
+  getSkillEntryDisplayName,
+  isInvalidSkillEntryCode,
 } from '@/utils/skillUploadParser';
 import type { SkillUploadPrecheckResult } from '@/types/skill';
-import type { ParsedSkillUploadEntry } from '@/utils/skillUploadParser';
 
 function isValidZipFile(file: File): boolean {
   return file.name.toLowerCase().endsWith('.zip') || file.type === 'application/zip';
@@ -25,31 +26,33 @@ function isValidZipFile(file: File): boolean {
 
 type BatchConflictPolicy = 'SKIP' | 'OVERWRITE';
 
-interface BatchPrecheckItem extends ParsedSkillUploadEntry {
-  result?: SkillUploadPrecheckResult;
+interface BatchPrecheckState {
+  items: SkillUploadPrecheckResult[];
 }
 
-interface BatchPrecheckState {
-  items: BatchPrecheckItem[];
+interface BatchUploadItemResultData {
+  name: string;
+  success: boolean;
+  errorCode: string;
+  errorMessage: string;
+  owner?: string;
 }
 
 interface BatchUploadResultData {
-  succeeded?: string[];
-  failed?: { name: string; reason: string }[];
+  results: BatchUploadItemResultData[];
 }
 
-function isBatchItemBlocked(item: BatchPrecheckItem): boolean {
-  if (item.kind !== 'SKILL') {
-    return false;
+function isPrecheckBlocked(result: SkillUploadPrecheckResult): boolean {
+  return result.precheckCode !== 'READY'
+    && result.precheckCode !== 'VERSION_ADJUSTED'
+    && result.precheckCode !== 'DRAFT_EXISTS';
+}
+
+function getBatchItemName(item: SkillUploadPrecheckResult): string {
+  if (isInvalidSkillEntryCode(item.precheckCode)) {
+    return getSkillEntryDisplayName(item.entryPath) || item.skillName || '-';
   }
-  return !item.result
-    || item.result.status === 'FORBIDDEN'
-    || item.result.status === 'CONFLICT'
-    || item.result.actions.length === 0;
-}
-
-function getBatchItemName(item: BatchPrecheckItem): string {
-  return item.result?.skillName || item.request?.skillName || item.entryKey;
+  return item.skillName || getSkillEntryDisplayName(item.entryPath) || '-';
 }
 
 interface UploadSkillDialogProps {
@@ -156,63 +159,84 @@ export function UploadSkillDialog({
 
   const getPrecheckMessages = useCallback(
     (result: SkillUploadPrecheckResult) => {
-      const messages: string[] = [];
-      const createAction = result.actions.find((item) => item.type === 'CREATE_DRAFT');
-
-      if (result.status === 'FORBIDDEN' || !result.writable) {
-        messages.push(t('skill.precheckNoPermission'));
-        return messages;
+      switch (result.precheckCode) {
+        case 'NO_PERMISSION':
+          return [t('skill.precheckNoPermission', { owner: result.owner || '-' })];
+        case 'REVIEWING_EXISTS':
+          return [t('skill.precheckReviewingBlocked', {
+            version: result.reviewingVersion ?? '',
+          })];
+        case 'DRAFT_EXISTS':
+          return [t('skill.precheckDraftOverwriteOnly', {
+            draftVersion: result.editingVersion ?? result.targetVersion ?? '',
+            version: result.targetVersion ?? '',
+          })];
+        case 'VERSION_ADJUSTED':
+          return [t('skill.precheckVersionConverted', {
+            parsedVersion: result.parsedVersion ?? '-',
+            version: result.targetVersion ?? '-',
+          })];
+        case 'READY':
+          return [t(result.exists
+            ? 'skill.precheckExistingSkillCreateDraft'
+            : 'skill.precheckNewSkill', {
+            version: result.targetVersion ?? '-',
+          })];
+        case 'NOT_A_SKILL':
+          return [t('skill.batchItemNonSkillFolderDesc')];
+        case 'INVALID_SKILL':
+          return [t('skill.batchItemInvalidSkillDesc')];
+        default:
+          return [t('skill.uploadPrecheckBlocked')];
       }
+    },
+    [t],
+  );
 
-      if (result.reviewingExists) {
-        messages.push(t('skill.precheckReviewingBlocked', {
-          version: result.reviewingVersion ?? '',
-        }));
-        return messages;
+  const getBatchItemDescription = useCallback(
+    (item: SkillUploadPrecheckResult) => {
+      switch (item.precheckCode) {
+        case 'NO_PERMISSION':
+          return t('skill.batchItemNoPermissionWithOwner', {
+            owner: item.owner || '-',
+          });
+        case 'REVIEWING_EXISTS':
+          return t('skill.precheckReviewingBlocked', {
+            version: item.reviewingVersion ?? '',
+          });
+        case 'DRAFT_EXISTS':
+        case 'READY':
+          return t(item.exists
+            ? 'skill.batchItemExistingVersionSummary'
+            : 'skill.batchItemNewVersionSummary', {
+            maxPublishedVersion: item.maxPublishedVersion ?? '-',
+            targetVersion: item.targetVersion ?? '-',
+          });
+        case 'VERSION_ADJUSTED':
+          return t(item.exists
+            ? 'skill.batchItemExistingVersionAdjusted'
+            : 'skill.batchItemVersionConverted', {
+            maxPublishedVersion: item.maxPublishedVersion ?? '-',
+            parsedVersion: item.parsedVersion ?? '-',
+            version: item.targetVersion ?? '-',
+            targetVersion: item.targetVersion ?? '-',
+          });
+        case 'NOT_A_SKILL':
+          return t('skill.batchItemNonSkillFolderDesc');
+        case 'INVALID_SKILL':
+          return t('skill.batchItemInvalidSkillDesc');
+        default:
+          return t('skill.uploadPrecheckBlocked');
       }
-
-      if (!result.exists) {
-        messages.push(t('skill.precheckNewSkill', {
-          version: createAction?.resultVersion ?? result.resolvedVersion,
-        }));
-        return messages;
-      }
-
-      if (result.versionExists) {
-        messages.push(t('skill.precheckVersionExists', {
-          version: result.parsedVersion,
-        }));
-      }
-
-      if (result.draftExists) {
-        messages.push(t('skill.precheckDraftOverwriteOnly', {
-          draftVersion: result.editingVersion ?? result.resolvedVersion,
-          parsedVersion: result.parsedVersion,
-          version: result.resolvedVersion,
-        }));
-        return messages;
-      }
-
-      messages.push(t('skill.precheckExistingSkillCreateDraft', {
-        version: createAction?.resultVersion ?? result.resolvedVersion,
-      }));
-      if (createAction && createAction.resultVersion !== result.parsedVersion) {
-        messages.push(t('skill.precheckCreateVersionAdjusted', {
-          parsedVersion: result.parsedVersion,
-          version: createAction.resultVersion,
-        }));
-      }
-      return messages.length > 0
-        ? messages
-        : [...result.errors, ...result.warnings, t('skill.uploadPrecheckBlocked')];
     },
     [t],
   );
 
   const showBatchUploadResult = useCallback(
     (data: BatchUploadResultData | undefined, skippedCount = 0) => {
-      const succeededList = data?.succeeded ?? [];
-      const failedList = data?.failed ?? [];
+      const results = data?.results ?? [];
+      const succeededList = results.filter(item => item.success);
+      const failedList = results.filter(item => !item.success);
       if (failedList.length === 0) {
         const message = skippedCount > 0
           ? t('skill.batchUploadSuccessWithSkipped', {
@@ -231,8 +255,8 @@ export function UploadSkillDialog({
         : t('skill.batchUploadAllFailed', { count: failedList.length });
       const description = (
         <div className="flex flex-col gap-0.5 text-xs">
-          {succeededList.map((name) => (
-            <div key={name} style={{ color: '#16a34a' }}>✓ {name}</div>
+          {succeededList.map((item) => (
+            <div key={item.name} style={{ color: '#16a34a' }}>✓ {item.name}</div>
           ))}
           {skippedCount > 0 && (
             <div style={{ color: '#64748b' }}>
@@ -241,7 +265,10 @@ export function UploadSkillDialog({
           )}
           {failedList.map((item) => (
             <div key={item.name} style={{ color: '#dc2626' }}>
-              ✗ {item.name}<span style={{ opacity: 0.8 }}> — {item.reason}</span>
+              ✗ {item.name}
+              <span style={{ opacity: 0.8 }}>
+                {' '}— [{item.errorCode}] {item.errorMessage}
+              </span>
             </div>
           ))}
         </div>
@@ -260,21 +287,9 @@ export function UploadSkillDialog({
       setChecking(true);
       setError(null);
       try {
-        const parsedEntries = await parseSkillUploadEntries(namespaceId, selectedFile);
-        if (requestId !== precheckRequestRef.current) {
-          return;
-        }
-        const validEntries = parsedEntries.filter(
-          (entry) => entry.kind === 'SKILL' && entry.request,
-        );
-        if (validEntries.length === 0) {
-          throw new Error(
-            parsedEntries[0]?.error || 'SKILL.md file not found in zip');
-        }
-        const requests = validEntries.map((entry) => entry.request!);
-        let resultList: SkillUploadPrecheckResult[] = [];
+        let resultList: SkillUploadPrecheckResult[];
         try {
-          const res = await skillApi.batchPrecheckUpload(requests);
+          const res = await skillApi.precheckUpload(namespaceId, selectedFile);
           resultList = res.data ?? [];
         } catch (err: unknown) {
           if (requestId !== precheckRequestRef.current) {
@@ -287,26 +302,22 @@ export function UploadSkillDialog({
         if (requestId !== precheckRequestRef.current) {
           return;
         }
-        if (parsedEntries.length > 1) {
-          let cursor = 0;
-          const items = parsedEntries.map((entry) => {
-            if (entry.kind !== 'SKILL' || !entry.request) {
-              return entry;
-            }
-            const result = resultList[cursor++];
-            return result ? { ...entry, result } : entry;
-          });
+        if (resultList.length === 0) {
+          setBatchPrecheck(null);
           setPrecheck(null);
-          setBatchConflictPolicy('SKIP');
-          setBatchPrecheck({ items });
+          setError(t('skill.uploadPrecheckBlocked'));
           return;
         }
-        const result = resultList[0] ?? null;
+        if (resultList.length > 1
+          || isInvalidSkillEntryCode(resultList[0].precheckCode)) {
+          setPrecheck(null);
+          setBatchConflictPolicy('SKIP');
+          setBatchPrecheck({ items: resultList });
+          return;
+        }
+        const result = resultList[0];
         setBatchPrecheck(null);
         setPrecheck(result);
-        if (!result || result.actions.length === 0) {
-          setError((result?.errors ?? []).join('; ') || t('skill.uploadPrecheckBlocked'));
-        }
       } catch (err: unknown) {
         if (requestId !== precheckRequestRef.current) {
           return;
@@ -326,7 +337,7 @@ export function UploadSkillDialog({
   const runUpload = useCallback(
     async (result: SkillUploadPrecheckResult) => {
       const res = await skillApi.upload(namespaceId, file as File, {
-        overwrite: result.draftExists,
+        overwrite: result.precheckCode === 'DRAFT_EXISTS',
       });
       toast.success(t('skill.uploadSuccessWithName', {
         name: res.data ?? result.skillName,
@@ -340,17 +351,21 @@ export function UploadSkillDialog({
   const runBatchUpload = useCallback(async () => {
     if (!file || !batchPrecheck) return;
     const items = batchPrecheck.items;
-    const skillItems = items.filter((item) => item.kind === 'SKILL');
-    const uploadOnlyItems = items.filter((item) => item.kind !== 'SKILL');
-    const draftItems = items.filter((item) => item.result?.draftExists);
+    const skillItems = items.filter(
+      (item) => !isInvalidSkillEntryCode(item.precheckCode),
+    );
+    const draftItems = skillItems.filter((item) => item.precheckCode === 'DRAFT_EXISTS');
     if (batchConflictPolicy === 'SKIP' && draftItems.length > 0) {
-      if (draftItems.length === skillItems.length && uploadOnlyItems.length === 0) {
+      const uploadableNonDraftExists = skillItems.some(
+        (item) => item.precheckCode !== 'DRAFT_EXISTS' && !isPrecheckBlocked(item),
+      );
+      if (!uploadableNonDraftExists) {
         setError(t('skill.batchUploadNothingToUpload'));
         return;
       }
       const uploadFile = await buildSkillBatchZipExcludingPrefixes(
         file,
-        draftItems.map((item) => item.rootPrefix),
+        draftItems.map((item) => item.entryPath || ''),
       );
       const res = await skillApi.batchUpload(namespaceId, uploadFile, { overwrite: false });
       showBatchUploadResult(res.data, draftItems.length);
@@ -404,8 +419,7 @@ export function UploadSkillDialog({
       if (!currentPrecheck) {
         return;
       }
-      if (currentPrecheck.actions.length === 0) {
-        setError(currentPrecheck.errors.join('; ') || t('skill.uploadPrecheckBlocked'));
+      if (isPrecheckBlocked(currentPrecheck)) {
         return;
       }
       await runUpload(currentPrecheck);
@@ -425,15 +439,26 @@ export function UploadSkillDialog({
     t,
   ]);
 
-  const precheckTargetVersion = precheck?.actions[0]?.resultVersion ?? precheck?.resolvedVersion;
+  const precheckTargetVersion = precheck?.targetVersion;
+  const precheckVersionConverted = precheck?.precheckCode === 'VERSION_ADJUSTED';
   const precheckMessages = precheck ? getPrecheckMessages(precheck) : [];
   const batchItems = batchPrecheck?.items ?? [];
-  const batchSkillItems = batchItems.filter((item) => item.kind === 'SKILL');
+  const batchSkillItems = batchItems.filter(
+    (item) => !isInvalidSkillEntryCode(item.precheckCode),
+  );
   const batchUploadOnlyCount = batchItems.length - batchSkillItems.length;
-  const batchExistingCount = batchSkillItems.filter((item) => item.result?.exists).length;
-  const batchBlockedCount = batchSkillItems.filter(isBatchItemBlocked).length;
-  const batchNewCount = batchSkillItems.filter((item) => item.result && !item.result.exists).length;
-  const batchDraftCount = batchSkillItems.filter((item) => item.result?.draftExists).length;
+  const batchExistingCount = batchSkillItems.filter((item) => item.exists).length;
+  const batchBlockedCount = batchSkillItems.filter(isPrecheckBlocked).length;
+  const batchNewCount = batchSkillItems.filter((item) => !item.exists).length;
+  const batchDraftCount = batchSkillItems.filter(
+    (item) => item.precheckCode === 'DRAFT_EXISTS',
+  ).length;
+  const batchHasUploadableSkill = batchSkillItems.some((item) => {
+    if (isPrecheckBlocked(item)) {
+      return false;
+    }
+    return batchConflictPolicy === 'OVERWRITE' || item.precheckCode !== 'DRAFT_EXISTS';
+  });
   const batchPolicyOptions = [
     {
       value: 'SKIP' as const,
@@ -450,19 +475,16 @@ export function UploadSkillDialog({
     ? checking ? t('skill.uploadChecking') : t('common.loading')
     : batchPrecheck
       ? t('skill.confirmBatchUpload')
-    : precheck?.draftExists
-      ? t('skill.confirmForceOverwriteUpload')
-      : t('skill.confirmUpload');
-  const precheckMessageClass = precheck?.status === 'CONFLICT'
-    || precheck?.status === 'FORBIDDEN'
-    || precheck?.actions.length === 0
+      : precheck?.precheckCode === 'DRAFT_EXISTS'
+        ? t('skill.confirmForceOverwriteUpload')
+        : t('skill.confirmUpload');
+  const precheckMessageClass = precheck && isPrecheckBlocked(precheck)
     ? 'text-destructive'
     : 'text-muted-foreground';
   const canSubmit = !!file && !loading && !error
-    && (
-      !!batchPrecheck
-      || (!!precheck && precheck.actions.length > 0)
-    );
+    && (batchPrecheck
+      ? batchHasUploadableSkill
+      : !!precheck && !isPrecheckBlocked(precheck));
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
@@ -509,10 +531,26 @@ export function UploadSkillDialog({
               <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
                 <span className="text-muted-foreground">{t('skill.skillName')}</span>
                 <span className="font-medium break-all">{precheck.skillName}</span>
-                <span className="text-muted-foreground">{t('skill.parsedVersion')}</span>
-                <span>{precheck.parsedVersion}</span>
+                {precheck.owner && (
+                  <>
+                    <span className="text-muted-foreground">{t('skill.owner')}</span>
+                    <span className="break-all">{precheck.owner}</span>
+                  </>
+                )}
+                {precheck.exists && precheck.precheckCode !== 'NO_PERMISSION' && (
+                  <>
+                    <span className="text-muted-foreground">
+                      {t('skill.maxPublishedVersion')}
+                    </span>
+                    <span>{precheck.maxPublishedVersion || '-'}</span>
+                  </>
+                )}
+                <span className="text-muted-foreground">
+                  {t(precheckVersionConverted ? 'skill.uploadedVersion' : 'skill.parsedVersion')}
+                </span>
+                <span>{precheck.parsedVersion || '-'}</span>
                 <span className="text-muted-foreground">{t('skill.resolvedVersion')}</span>
-                <span>{precheckTargetVersion}</span>
+                <span>{precheckTargetVersion || '-'}</span>
               </div>
 
               {precheckMessages.length > 0 && (
@@ -617,21 +655,32 @@ export function UploadSkillDialog({
 
               <div className="max-h-44 space-y-1 overflow-y-auto rounded-md border p-2">
                 {batchItems.map((item) => {
-                  const blocked = isBatchItemBlocked(item);
-                  const uploadOnly = item.kind !== 'SKILL';
+                  const uploadOnly = isInvalidSkillEntryCode(item.precheckCode);
+                  const nonSkill = item.precheckCode === 'NOT_A_SKILL';
+                  const blocked = !uploadOnly && isPrecheckBlocked(item);
+                  const itemName = getBatchItemName(item);
                   return (
                     <div
-                      key={item.entryKey}
+                      key={`${item.entryPath || ''}:${item.skillName || ''}`}
                       className="flex items-center justify-between gap-3 py-1"
                     >
                       <div className="min-w-0">
-                        <p className="truncate font-medium">{getBatchItemName(item)}</p>
+                        {uploadOnly && item.entryPath ? (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <p className="truncate font-medium cursor-help" tabIndex={0}>
+                                {itemName}
+                              </p>
+                            </TooltipTrigger>
+                            <TooltipContent className="max-w-sm break-all">
+                              {item.entryPath}
+                            </TooltipContent>
+                          </Tooltip>
+                        ) : (
+                          <p className="truncate font-medium">{itemName}</p>
+                        )}
                         <p className="text-xs text-muted-foreground truncate">
-                          {item.kind === 'INVALID_SKILL'
-                            ? t('skill.batchItemInvalidSkillDesc')
-                          : item.kind === 'NON_SKILL_FOLDER'
-                            ? t('skill.batchItemNonSkillFolderDesc')
-                            : item.result?.parsedVersion ?? item.request?.parsedVersion ?? item.entryKey}
+                          {getBatchItemDescription(item)}
                         </p>
                       </div>
                       <span className={`shrink-0 text-xs ${
@@ -639,22 +688,22 @@ export function UploadSkillDialog({
                           ? 'text-destructive'
                           : uploadOnly
                             ? 'text-muted-foreground'
-                          : item.result?.exists
-                            ? 'text-amber-600'
-                            : 'text-emerald-600'
+                            : item.exists
+                              ? 'text-amber-600'
+                              : 'text-emerald-600'
                       }`}
                       >
                         {blocked
                           ? t('skill.batchItemBlocked')
-                          : item.kind === 'INVALID_SKILL'
-                            ? t('skill.batchItemInvalidSkill')
-                          : item.kind === 'NON_SKILL_FOLDER'
-                            ? t('skill.batchItemNonSkillFolder')
-                          : item.result?.draftExists
-                            ? t('skill.batchItemDraft')
-                          : item.result?.exists
-                            ? t('skill.batchItemExisting')
-                            : t('skill.batchItemNew')}
+                          : uploadOnly
+                            ? t(nonSkill
+                              ? 'skill.batchItemNonSkillFolder'
+                              : 'skill.batchItemInvalidSkill')
+                            : item.precheckCode === 'DRAFT_EXISTS'
+                              ? t('skill.batchItemDraft')
+                              : item.exists
+                                ? t('skill.batchItemExisting')
+                                : t('skill.batchItemNew')}
                       </span>
                     </div>
                   );

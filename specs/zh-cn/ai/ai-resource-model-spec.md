@@ -19,6 +19,8 @@
 本文档定义 AI Registry 资源的标准元数据和版本模型，并细化
 [AI Registry 规范](ai-registry-spec.md)。
 
+scope 校验使用所选可见性插件的声明集合；内置值与默认创建行为保持不变。
+
 ## 1. 身份
 
 AI 资源元数据身份为：
@@ -43,7 +45,7 @@ namespaceId + resourceType + resourceName + version
 | 字段 | 含义 |
 | --- | --- |
 | `namespaceId` | Namespace 隔离边界。 |
-| `type` | 资源类型，例如 `prompt`、`skill`、`agentspec`。 |
+| `type` | 资源类型，例如 `mcp`、`agent`、`prompt`、`skill`、`agentspec`。 |
 | `name` | 稳定资源名。 |
 | `desc` | 资源描述。 |
 | `status` | 资源元数据状态，目前为 `enable` 或 `disable`。 |
@@ -100,8 +102,31 @@ Labels 不得指向 draft 或 reviewing 版本。运行时客户端可以通过�
 默认存储实现基于 Nacos Config，但 Config 在这里只是存储后端。通过
 `nacos_config` 保存的 AI 内容不应被视为用户拥有的 Config 资源。
 
+每个版本必须在 `AiResourceVersion.storage` 中持久化选定的存储 provider。有效 provider
+配置只在写入新版本时选择 provider；已有版本的读取、draft 覆盖和删除必须按已持久化的
+provider 路由。缺少 provider 的历史存储描述归属于 `nacos_config`。
+
 存储扩展行为由 [AI 存储插件规范](../plugin/ai-storage-plugin-spec.md)定义。数据库
 方言行为由 [数据源方言插件规范](../plugin/datasource-dialect-plugin-spec.md)定义。
+
+类型自有 JSON 必须具有明确的 Schema 契约。对 `type=agent`，`ext` 保存目录扩展和
+派生的在线版本目录，Version `storage` 指向一个完整的 Agent Version 内容对象。
+精确字段和重建规则由 [Agent 管理规范](agent-management-spec.md)与
+[Agent 存储规范](agent-storage-spec.md)定义。Runtime Agent Endpoint 遵循客户端拥有的
+Naming 生命周期，不写入 `AiResourceVersion.storage`。
+
+对 `type=mcp`，标准资源名为 `mcpName`。Resource `ext` 只保存 Schema Version 和已废弃的
+UUID 形态 `mcpId` 物理存储及旧 API 别名。Version `storage` Descriptor 通过 Allowlist
+限定的 `mcp-config-v1` Key 格式指向现有 MCP Server 和可选 Tools/Resources Config 对象；
+它不会复制、重写或扩展这些 Payload，也不会把它们变成用户拥有的 Config 资源。精确字段由
+[MCP Server 规范](mcp-server-spec.md)以及 MCP
+[Resource 扩展](../../schemas/ai/mcp/internal/v1/mcp-resource-ext.schema.json)和
+[Version Storage](../../schemas/ai/mcp/internal/v1/mcp-version-storage.schema.json) Schema 定义。
+
+MCP Runtime Endpoint 不写入 `AiResourceVersion.storage`，而是使用客户端拥有的 Naming
+运行时状态。MCP 普通 Service Ref 仍归其 Naming 用户所有；MCP Direct 持久 Naming Service
+继续作为当前 Endpoint 事实和兼容 Serving 契约，不会在生命周期托管时被 Version Config
+快照替代。
 
 ## 6. 可见性
 
@@ -113,6 +138,8 @@ AI 资源通过共享的可见性插件模型实现可见性。
 - 读操作中，如果资源存在但调用者不可见，应返回 not found；
 - 写操作在修改元数据、版本或 scope 之前必须检查写权限；
 - 查询操作应尽量使用 visibility query advice，而不是先读取大结果集再过滤。
+- 查询请求中的 owner、scope 等业务筛选条件必须与 visibility query advice 取交集后再
+  执行 count 和分页；类型实现不得在转换完成后覆盖可见性条件。
 
 扩展契约由 [可见性插件规范](../auth/visibility-plugin-spec.md)定义。
 

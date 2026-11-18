@@ -22,12 +22,13 @@ import com.alibaba.nacos.api.exception.api.NacosApiException;
 import com.alibaba.nacos.api.model.v2.ErrorCode;
 import com.alibaba.nacos.common.utils.StringUtils;
 import com.alibaba.nacos.core.context.RequestContextHolder;
+import com.alibaba.nacos.core.plugin.visibility.VisibilityPluginManager;
 import com.alibaba.nacos.plugin.auth.api.IdentityContext;
 import com.alibaba.nacos.plugin.auth.constant.Constants;
 import com.alibaba.nacos.plugin.visibility.constant.VisibilityConstants;
 import com.alibaba.nacos.plugin.visibility.model.VisibilityResource;
+import com.alibaba.nacos.plugin.visibility.model.VisibilityScopeRegistry;
 import com.alibaba.nacos.plugin.visibility.spi.ValidationResult;
-import com.alibaba.nacos.plugin.visibility.spi.VisibilityPluginManager;
 import com.alibaba.nacos.plugin.visibility.spi.VisibilityService;
 import com.alibaba.nacos.sys.env.EnvUtil;
 
@@ -43,6 +44,13 @@ import java.util.Optional;
  */
 public class VisibilityHelper {
     
+    /**
+     * Legacy visibility implementation selector.
+     *
+     * @deprecated use unified visibility implementation state instead. Planned for removal in
+     *     Nacos 4.0.0.
+     */
+    @Deprecated
     private static final String VISIBILITY_PLUGIN_TYPE_CONFIG_KEY = "nacos.plugin.visibility.type";
     
     private static final String DEFAULT_VISIBILITY_SERVICE_NAME = "nacos";
@@ -128,12 +136,45 @@ public class VisibilityHelper {
      * @return true when readable, false otherwise
      */
     public static boolean canReadResource(VisibilityResource resource) {
+        return canReadResource(resolveCurrentIdentity(), resolveCurrentApiType(), resource);
+    }
+    
+    /**
+     * Check read visibility for a stable previously authenticated owner context.
+     *
+     * <p>This overload does not replay authentication credentials. It is intended for asynchronous
+     * invalidation admission; the following business read must still pass normal request
+     * authorization.</p>
+     *
+     * @param identity stable identity id captured at request admission
+     * @param apiType admitted API type
+     * @param resource resource carrying current owner and scope
+     * @return true when readable, false otherwise
+     */
+    public static boolean canReadResource(String identity, String apiType,
+        VisibilityResource resource) {
         Optional<VisibilityService> visibilityService = findVisibilityService();
         if (visibilityService.isEmpty()) {
             return true;
         }
         ValidationResult result = visibilityService.get()
-            .validateVisibility(resolveCurrentIdentity(), VisibilityConstants.ACTION_READ,
+            .validateVisibility(identity, VisibilityConstants.ACTION_READ, apiType, resource);
+        return result.isAllowed();
+    }
+    
+    /**
+     * Check write permission for current user on the given resource.
+     *
+     * @param resource the resource to check
+     * @return true when writable, false otherwise
+     */
+    public static boolean canWriteResource(VisibilityResource resource) {
+        Optional<VisibilityService> visibilityService = findVisibilityService();
+        if (visibilityService.isEmpty()) {
+            return true;
+        }
+        ValidationResult result = visibilityService.get()
+            .validateVisibility(resolveCurrentIdentity(), VisibilityConstants.ACTION_WRITE,
                 resolveCurrentApiType(),
                 resource);
         return result.isAllowed();
@@ -174,6 +215,18 @@ public class VisibilityHelper {
             .filter(StringUtils::isNotBlank)
             .map(each -> each.toUpperCase(Locale.ROOT))
             .orElse(VisibilityConstants.SCOPE_PRIVATE);
+    }
+    
+    /**
+     * Resolve scope declarations only from the selected, enabled visibility service.
+     */
+    public static VisibilityScopeRegistry scopeRegistry() {
+        if (EnvUtil.getEnvironment() == null) {
+            return VisibilityScopeRegistry.defaults();
+        }
+        return findVisibilityService()
+            .map(service -> new VisibilityScopeRegistry(service.getAdditionalScopes()))
+            .orElseGet(VisibilityScopeRegistry::defaults);
     }
     
     private static String resolveVisibilityServiceName() {

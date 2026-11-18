@@ -67,7 +67,7 @@ import com.alibaba.nacos.common.remote.client.RpcClientFactory;
 import com.alibaba.nacos.common.remote.client.ServerListFactory;
 import com.alibaba.nacos.common.remote.client.grpc.GrpcClientConfig;
 import com.alibaba.nacos.common.utils.CollectionUtils;
-import com.alibaba.nacos.common.utils.JacksonUtils;
+import com.alibaba.nacos.api.utils.json.JsonUtils;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -263,8 +263,9 @@ public class NamingGrpcClientProxy extends AbstractNamingClientProxy {
         throws NacosException {
         BatchInstanceRequest request = new BatchInstanceRequest(namespaceId, serviceName, groupName,
             NamingRemoteConstants.BATCH_REGISTER_INSTANCE, instances);
+        long connectionEpoch = redoService.getCurrentConnectionEpoch();
         requestToServer(request, BatchInstanceResponse.class);
-        redoService.instanceRegistered(serviceName, groupName);
+        redoService.instanceRegistered(serviceName, groupName, connectionEpoch);
     }
     
     /**
@@ -279,8 +280,9 @@ public class NamingGrpcClientProxy extends AbstractNamingClientProxy {
         throws NacosException {
         InstanceRequest request = new InstanceRequest(namespaceId, serviceName, groupName,
             NamingRemoteConstants.REGISTER_INSTANCE, instance);
+        long connectionEpoch = redoService.getCurrentConnectionEpoch();
         requestToServer(request, Response.class);
-        redoService.instanceRegistered(serviceName, groupName);
+        redoService.instanceRegistered(serviceName, groupName, connectionEpoch);
     }
     
     /**
@@ -405,7 +407,7 @@ public class NamingGrpcClientProxy extends AbstractNamingClientProxy {
             new ServiceListRequest(namespaceId, groupName, pageNo, pageSize);
         if (selector != null) {
             if (SelectorType.valueOf(selector.getType()) == SelectorType.label) {
-                request.setSelector(JacksonUtils.toJson(selector));
+                request.setSelector(JsonUtils.toJson(selector));
             }
         }
         ServiceListResponse response = requestToServer(request, ServiceListResponse.class);
@@ -418,7 +420,8 @@ public class NamingGrpcClientProxy extends AbstractNamingClientProxy {
     @Override
     public ServiceInfo subscribe(String serviceName, String groupName, String clusters)
         throws NacosException {
-        NAMING_LOGGER.info("[GRPC-SUBSCRIBE] service:{}, group:{}, cluster:{} ", serviceName,
+        NAMING_LOGGER.info("[GRPC-SUBSCRIBE] {} service:{}, group:{}, cluster:{} ", namespaceId,
+            serviceName,
             groupName, clusters);
         redoService.cacheSubscriberForRedo(serviceName, groupName, clusters);
         return doSubscribe(serviceName, groupName, clusters);
@@ -447,7 +450,8 @@ public class NamingGrpcClientProxy extends AbstractNamingClientProxy {
     @Override
     public void unsubscribe(String serviceName, String groupName, String clusters)
         throws NacosException {
-        NAMING_LOGGER.info("[GRPC-UNSUBSCRIBE] service:{}, group:{}, cluster:{} ", serviceName,
+        NAMING_LOGGER.info("[GRPC-UNSUBSCRIBE] {} service:{}, group:{}, cluster:{} ", namespaceId,
+            serviceName,
             groupName, clusters);
         redoService.subscriberDeregister(serviceName, groupName, clusters);
         doUnsubscribe(serviceName, groupName, clusters);
@@ -457,6 +461,11 @@ public class NamingGrpcClientProxy extends AbstractNamingClientProxy {
     public boolean isSubscribed(String serviceName, String groupName, String clusters)
         throws NacosException {
         return redoService.isSubscriberRegistered(serviceName, groupName, clusters);
+    }
+    
+    @Override
+    public boolean hasSubscriptionIntent(String serviceName, String groupName, String clusters) {
+        return redoService.hasSubscriptionIntent(serviceName, groupName, clusters);
     }
     
     /**
@@ -562,14 +571,14 @@ public class NamingGrpcClientProxy extends AbstractNamingClientProxy {
         
         try {
             if (Objects.isNull(response)) {
-                MetricsMonitor.getNamingRequestFailedMonitor(request.getClass().getSimpleName(),
+                MetricsMonitor.recordNamingRequestFailed(request.getClass().getSimpleName(),
                     MONITOR_LABEL_NONE,
-                    MONITOR_LABEL_NONE, exception.getClass().getSimpleName()).inc();
+                    MONITOR_LABEL_NONE, exception.getClass().getSimpleName());
             } else {
-                MetricsMonitor.getNamingRequestFailedMonitor(request.getClass().getSimpleName(),
+                MetricsMonitor.recordNamingRequestFailed(request.getClass().getSimpleName(),
                     String.valueOf(response.getResultCode()),
                     String.valueOf(response.getErrorCode()),
-                    MONITOR_LABEL_NONE).inc();
+                    MONITOR_LABEL_NONE);
             }
         } catch (Throwable t) {
             NAMING_LOGGER.warn("Fail to record metrics for request {}",

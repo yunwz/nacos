@@ -29,7 +29,7 @@ import com.alibaba.nacos.client.naming.utils.CacheDirUtil;
 import com.alibaba.nacos.common.lifecycle.Closeable;
 import com.alibaba.nacos.common.notify.NotifyCenter;
 import com.alibaba.nacos.common.utils.ConvertUtils;
-import com.alibaba.nacos.common.utils.JacksonUtils;
+import com.alibaba.nacos.api.utils.json.JsonUtils;
 import com.alibaba.nacos.common.utils.StringUtils;
 
 import java.util.Map;
@@ -115,7 +115,7 @@ public class ServiceInfoHolder implements Closeable {
      * @return service info
      */
     public ServiceInfo processServiceInfo(String json) {
-        ServiceInfo serviceInfo = JacksonUtils.toObj(json, ServiceInfo.class);
+        ServiceInfo serviceInfo = JsonUtils.toObj(json, ServiceInfo.class);
         serviceInfo.setJsonFromServer(json);
         return processServiceInfo(serviceInfo);
     }
@@ -127,30 +127,40 @@ public class ServiceInfoHolder implements Closeable {
      * @return service info
      */
     public ServiceInfo processServiceInfo(ServiceInfo serviceInfo) {
+        return processServiceInfo(serviceInfo, false);
+    }
+    
+    /**
+     * Process service info.
+     *
+     * @param serviceInfo new service info
+     * @param fromPush whether triggered by push or background refresh
+     * @return service info
+     */
+    public ServiceInfo processServiceInfo(ServiceInfo serviceInfo, boolean fromPush) {
         String serviceKey = serviceInfo.getKeyWithoutClusters();
         if (serviceKey == null) {
             NAMING_LOGGER.warn("process service info but serviceKey is null, service host: {}",
-                JacksonUtils.toJson(serviceInfo.getHosts()));
+                JsonUtils.toJson(serviceInfo.getHosts()));
             return null;
         }
-        ServiceInfo oldService = serviceInfoMap.get(serviceKey);
         if (isEmptyOrErrorPush(serviceInfo)) {
             //empty or error push, just ignore
             NAMING_LOGGER.warn(
                 "process service info but found empty or error push, serviceKey: {}, "
                     + "pushEmptyProtection: {}, hosts: {}",
                 serviceKey, pushEmptyProtection, serviceInfo.getHosts());
-            return oldService;
+            return serviceInfoMap.get(serviceKey);
         }
-        serviceInfoMap.put(serviceKey, serviceInfo);
+        ServiceInfo oldService = serviceInfoMap.put(serviceKey, serviceInfo);
         InstancesDiff diff = getServiceInfoDiff(oldService, serviceInfo);
         if (StringUtils.isBlank(serviceInfo.getJsonFromServer())) {
-            serviceInfo.setJsonFromServer(JacksonUtils.toJson(serviceInfo));
+            serviceInfo.setJsonFromServer(JsonUtils.toJson(serviceInfo));
         }
         
         if (enableClientMetrics) {
             try {
-                MetricsMonitor.getServiceInfoMapSizeMonitor().set(serviceInfoMap.size());
+                MetricsMonitor.recordServiceInfoMapSize(serviceInfoMap.size());
             } catch (Throwable t) {
                 NAMING_LOGGER.error("Failed to update metrics for service info map size", t);
             }
@@ -159,13 +169,13 @@ public class ServiceInfoHolder implements Closeable {
         if (diff.hasDifferent()) {
             NAMING_LOGGER.info("current ips:({}) service: {} -> {}", serviceInfo.ipCount(),
                 serviceKey,
-                JacksonUtils.toJson(serviceInfo.getHosts()));
+                JsonUtils.toJson(serviceInfo.getHosts()));
             
             if (!failoverReactor.isFailoverSwitch(serviceKey)) {
                 NotifyCenter.publishEvent(
                     new InstancesChangeEvent(notifierEventScope, serviceInfo.getName(),
                         serviceInfo.getGroupName(),
-                        serviceInfo.getClusters(), serviceInfo.getHosts(), diff));
+                        serviceInfo.getClusters(), serviceInfo.getHosts(), diff, fromPush));
             }
             publishDiskCacheRefreshEvent(serviceKey, serviceInfo);
         }

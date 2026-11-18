@@ -54,6 +54,10 @@ Domain rules:
 - AI push behavior is versioned by each AI resource spec and must keep the same
   identity rules as the corresponding query API.
 
+RAD Watch carries only an invalidation hint. The client must execute the
+ordinary authorized Discover operation and compare the complete canonical
+result fingerprint before replacing its local cache or invoking a listener.
+
 ## 3. Server-Side Connection State
 
 Runtime listener or subscription state is scoped to a server-side connection id.
@@ -107,7 +111,111 @@ Client recovery is defined in detail by the
 selection and liveness are defined by the
 [Client Connection And Failover Spec](client-connection-failover-spec.md).
 
-## 6. Ordering
+## 6. Agent And RAD Watch Contract
+
+This section defines Nacos Agent/RAD server-aware Watch. It is advertised only
+after the independent abilities in the
+[Agent API Spec](../ai/agent-api-spec.md) are implemented and negotiated.
+
+### 6.1 Identity, Projection, And Fingerprint
+
+The canonical local Watch identity is:
+
+```text
+(namespaceId, canonicalAgentReference, canonicalFilter, listenerIdentity)
+```
+
+The canonical reference preserves exact Version, Label, explicit latest, and
+the rollout-safe unspecified-version form. Filter construction materializes
+defaults and sorts and deduplicates set-valued fields. Listener identity is the
+same listener instance supplied to cancellation. The server projection key
+excludes listener identity and authorization/visibility scope; authorization
+decides whether a caller may install or refresh a Watch and is never encoded as
+resource identity.
+
+Client and server share canonical request normalization and complete-result
+fingerprinting. Fingerprint format is
+`sha256-canonical-json-v1:<64-lowercase-hex>`. It is an equality token only,
+not a sequence, version, authorization proof, or replay cursor. Equal final
+fingerprints permit A-B-A task coalescing without another listener callback.
+
+### 6.2 Server Projection And Push Execution
+
+Definition, Version/Label, visibility, runtime Endpoint, liveness, and
+connection cleanup events mark affected projections dirty. The reusable push
+pipeline follows Naming's latest-snapshot task discipline: producers add or
+merge a delay task by projection; tasks not yet executing may coalesce; once
+execution starts it completes; a concurrent later change creates or merges
+into a subsequent task. Agent supplies projection matching and fingerprint
+construction, while shared runtime code supplies task merge, target fan-out,
+connection lookup, asynchronous push, retry, and metrics.
+
+The server does not keep a prior business snapshot or per-Watch sequence. A
+gRPC Notify contains only `watchKey`, event type, optional observed
+fingerprint, and terminal error code. The client acknowledges after validating
+the key and marking the local intent dirty. ACK does not wait for Discover or
+listener execution. Retry is bounded and connection-scoped; exhausting retry
+may force reconnect so resubscription restores intent.
+
+### 6.3 Current-Fact Refresh And Listener Delivery
+
+Every accepted Hint, reconnect refresh requirement, HTTP changed item, or
+polling-fallback tick executes ordinary authorized Discover. The client
+canonicalizes the complete result and compares its fingerprint with cache.
+Only a different result atomically replaces cache and emits a complete
+`SNAPSHOT`; it never merges result fragments. An empty filtered shape is a
+valid snapshot. Listener work is isolated from connection and long-poll I/O;
+slow, throwing, or rejected listener execution cannot change Hint ACK state or
+block background observation. A saturated bounded callback pool may delay other listeners.
+
+Only authorized Discover confirming an unresolved Agent reference enters absent
+state and generates one `UNAVAILABLE` per absent period; recovery generates a snapshot.
+All background failures retain accepted intent and last confirmed data, including
+authorization, capacity, migration, binding and executor rejection. They retry with
+bounded backoff and never become data events. Rejected background submissions
+remain pending for an independent retry entry point; only unsubscribe or shutdown
+ends the subscription.
+
+Local delivery follows Config's current-state versus handled-state check: one latest
+state and local sequence per Watch, and at most one queued/running task per Listener.
+Execution selects current state and copies its result. Changes, including brief absence,
+coalesce during in-flight delivery instead of accumulating snapshots. Executor lookup
+or submission failures retain the difference for periodic local retry without another
+server query or user code on the checking thread. Cancellation invalidates old tasks;
+an invoked callback that throws is not automatically replayed. See the
+[Agent API contract](../ai/agent-api-spec.md#21-java-sdk-contract).
+
+### 6.4 gRPC Reconnect
+
+gRPC Watch state belongs to one connection. Disconnect removes server state
+and invalidates every old `watchKey`. The SDK retains canonical local intent,
+re-subscribes the complete active set under the new connection, and performs
+Discover when `refreshRequired` is true. There is no periodic full-data Sync;
+resubscription plus current-fact Discover is the reconciliation mechanism.
+Late notifications for old keys are rejected and cannot reach listeners.
+
+### 6.5 HTTP Batch Long Poll
+
+HTTP uses one request-scoped batch long poll for the complete current Watch
+set, not one request per Agent. The request contains local generation, timeout,
+and each item with client Watch id, discovery request, and last materialized
+fingerprint. A response contains timeout or changed client ids only. It carries
+no business data and no per-item authorization details.
+
+Each long-poll request may reach a different cluster node. Correctness does not
+depend on node-local generation continuity: the receiving node compares the
+submitted fingerprints with its current serving projection, and a returned id
+is re-fetched through Discover. Local list changes advance generation and
+supersede the prior request. A late old-generation response is ignored. Server
+awareness of socket cancellation is an optimization; timeout and the next
+complete-list request clean up request-scoped wait state.
+
+The first HTTP binding performs one-namespace request-level AI read
+authorization and deliberately does not implement per-item multi-resource
+fine-grained authorization. Discover remains the mandatory content and
+visibility authorization boundary.
+
+## 7. Ordering
 
 Push delivery order is scoped to the local event and task paths of a node. It is
 not a global total order across the cluster.
@@ -122,7 +230,7 @@ Domain specs must define when a local serving view is visible:
 - Naming persistent service and metadata visibility are defined by the
   [Naming Persistent CP Consistency Spec](../naming/naming-persistent-cp-consistency-spec.md).
 
-## 7. Failure Rules
+## 8. Failure Rules
 
 - A missing connection should cancel or skip push for that connection.
 - A push timeout does not prove that the client failed to observe the change;
@@ -130,10 +238,24 @@ Domain specs must define when a local serving view is visible:
 - A client must be able to recover from missed push by re-query, resync, or redo.
 - Server push must not hide authorization failures in the underlying query path.
 
-## 8. Pending Issues
+## 9. Pending Issues
 
-- AI runtime push and reconnect behavior should be refined when AI SDK
-  subscription APIs stabilize.
 - Push retry, timeout, and reconnect recovery observations should follow the
   shared field and label guidance in the
   [Observability Hooks Spec](../design/foundation-observability-hooks-spec.md).
+
+## Java SDK initialization delivery
+
+Native Java `subscribeAgent` returns void and supplies current state and later changes
+through the same Listener, as specified in [Agent API](../ai/agent-api-spec.md).
+The existing Subscribe fingerprint comparison and first HTTP long-poll comparison close
+the Discover-to-Watch window. No wire fields or server behavior change. Local notification
+sequencing must prevent a stale initialization from following a newer delivered state.
+
+### Discover notification attribution
+
+Notification-triggered queries and retries of the same refresh carry
+`X-Nacos-Agent-Discovery-Trigger: watch-notify` through HTTP headers or gRPC request
+headers. Initialization, handshake reconciliation, and polling fallback omit it.
+Coalescing, concurrent refresh, recovery, and compatibility rules are defined in the
+[Agent API spec](../ai/agent-api-spec.md).

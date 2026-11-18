@@ -35,6 +35,44 @@ namespaceId -> groupName -> dataId
 身份字段是稳定的。修改 `namespaceId`、`groupName` 或 `dataId` 表示新资源、克隆、导入或删除后重建，
 不是普通元数据更新。
 
+持久化层或管理面返回的存储 ID 是实现细节。即使管理 API 或 SDK 允许通过存储 ID 批量选择配置，
+该操作也必须继续受请求中归一化后的 `namespaceId` 约束；存储 ID 不能作为绕过 namespace 身份的
+全局资源令牌。
+
+Config 存储 ID 出现在 JSON 响应中时，必须序列化为十进制字符串，而不是 JSON number，避免无法安全
+表示 64 位整数的客户端丢失精度。
+
+克隆操作同时涉及源身份和目标身份。当克隆请求通过存储 ID 选择源配置时，这些 ID 只能在归一化后的
+源 namespace 内解析。目标 namespace 只决定克隆配置写入的位置，不得授权或隐含跨 namespace
+读取源配置。
+
+Config 管理 API 或 SDK 请求中接受存储 ID 仅属于兼容行为，应标记为废弃并待移除。新的 Config
+管理 API 不得把存储 ID 作为选择器暴露；现有 `ids` 或 `configId` 等选择器应在兼容窗口后移除，
+并迁移到以 `namespaceId`、`groupName`、`dataId` 或这些身份元组列表为基础的选择模型。
+
+### HTTP 命名空间解析
+
+Config v3 HTTP 鉴权与 Controller 执行使用相同的命名空间字段。普通 v3 API 使用
+`namespaceId` 解析鉴权资源，即使该字段缺省或为空，资源解析阶段也忽略 `tenant`。
+空值归一化为 `public`。参数校验提取器保留现有的别名校验行为，该独立校验阶段不在
+本次重构范围内。
+
+Admin clone 的目标字段为 `namespaceId`，源字段为 `sourceNamespaceId`；Console clone
+的目标字段为 `targetNamespaceId`，源字段为 `namespaceId`。显式空目标表示 `public`，
+不能回退到源。保留同命名空间克隆的源默认语义：源缺省或为空时使用目标。目标 WRITE 与
+源 READ 权限独立检查。
+
+clone、import、export 和 batch delete 使用专用资源解析器。每个命名空间字段接受一个
+显式值，拒绝重复值（包括相同值重复），并在主字段缺省时拒绝 `field[]`。export 使用
+表单绑定，主字段缺省时还拒绝 `!namespaceId`；显式主字段优先于这些回退字段。
+标量请求参数不解释 `!field`。会绑定为命名空间的 multipart 文件字段被拒绝；检查仅
+读取 Part 元数据，不读取文件内容或请求输入流。
+
+这些检查沿用现有鉴权链路，保留关闭鉴权和服务端身份的绕过语义，不改变普通 v3 的 MVC
+绑定、不扩大鉴权接口范围，也不引入旧版 `tenant` 别名规则。上述管理接口的调用方须发送
+单一文本命名空间字段；资源鉴权启用时不再接受绑定替代字段或重复值。存储 ID 的对象归属
+检查仍然必须执行。
+
 ## 2. 内容与版本字段
 
 | 字段 | 含义 |
@@ -78,6 +116,10 @@ namespaceId -> groupName -> dataId
 
 Config 服务端会校验 `dataId`、`groupName`、`namespaceId`、tag 和部分元数据字段。公开 Config
 名称应只包含字母、数字、`_`、`-`、`.` 和 `:`，除非未来领域规范明确扩展字符集。
+
+点号可以作为 Config 名称的一部分，但任何身份字段都不得完整等于目录控制段 `.` 或 `..`。本地 dump
+实现还必须将每个身份字段解析为所选 dump 层级下的一个直接子项，并拒绝任何无法保持该层级关系的
+规范化路径。
 
 当前字段限制包括：
 

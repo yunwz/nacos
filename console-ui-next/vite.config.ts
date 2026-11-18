@@ -5,6 +5,8 @@ import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
 
 const isTest = !!process.env.VITEST;
+const objectHasOwnPolyfillBanner =
+  "if(typeof Object.hasOwn!=='function'){Object.defineProperty(Object,'hasOwn',{configurable:true,writable:true,value:function(o,p){return Object.prototype.hasOwnProperty.call(Object(o),p);}});}";
 
 export default defineConfig(({ command }) => ({
   base: command === 'build' ? './' : '/',
@@ -21,9 +23,15 @@ export default defineConfig(({ command }) => ({
         'process.version': JSON.stringify(''),
       },
   resolve: {
-    alias: {
-      '@': path.resolve(__dirname, './src'),
-    },
+    alias: [
+      { find: '@', replacement: path.resolve(__dirname, './src') },
+      {
+        // Monaco embeds DOMPurify, so the npm override alone does not patch its runtime.
+        // Route its sanitizer to the patched package (GHSA-55q2-fjhq-7xh7).
+        find: './dompurify/dompurify.js',
+        replacement: path.resolve(__dirname, './node_modules/dompurify/dist/purify.es.mjs'),
+      },
+    ],
   },
   server: {
     port: 8000,
@@ -54,10 +62,23 @@ export default defineConfig(({ command }) => ({
       },
     },
   },
+  worker: {
+    rolldownOptions: {
+      output: {
+        banner: objectHasOwnPolyfillBanner,
+      },
+    },
+  },
   build: {
+    // Lower Chrome to 90 for #15899, but keep Vite's other browser targets so
+    // CSS still emits Safari -webkit-* prefixes (cssTarget inherits build.target).
+    target: ['chrome90', 'edge111', 'firefox114', 'safari16.4', 'ios16.4'],
+    cssTarget: ['chrome90', 'edge111', 'firefox114', 'safari16.4', 'ios16.4'],
     outDir: 'dist',
     rollupOptions: {
       output: {
+        // Workers use their own build options and receive the same banner above.
+        banner: objectHasOwnPolyfillBanner,
         entryFileNames: 'js/main.js',
         chunkFileNames: 'js/[name].js',
         assetFileNames: (info) => {

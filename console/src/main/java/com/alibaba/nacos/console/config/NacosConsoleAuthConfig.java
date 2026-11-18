@@ -19,9 +19,13 @@ package com.alibaba.nacos.console.config;
 import com.alibaba.nacos.api.common.ApiType;
 import com.alibaba.nacos.auth.config.NacosAuthConfig;
 import com.alibaba.nacos.common.utils.StringUtils;
+import com.alibaba.nacos.core.auth.AuthPluginTypeResolver;
 import com.alibaba.nacos.core.config.AbstractDynamicConfig;
 import com.alibaba.nacos.plugin.auth.constant.Constants;
+import com.alibaba.nacos.sys.env.DeploymentType;
 import com.alibaba.nacos.sys.env.EnvUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Nacos console auth configurations.
@@ -29,6 +33,8 @@ import com.alibaba.nacos.sys.env.EnvUtil;
  * @author xiweng.yy
  */
 public class NacosConsoleAuthConfig extends AbstractDynamicConfig implements NacosAuthConfig {
+    
+    private static final Logger LOGGER = LoggerFactory.getLogger(NacosConsoleAuthConfig.class);
     
     public static final String NACOS_CONSOLE_AUTH_SCOPE = ApiType.CONSOLE_API.name();
     
@@ -41,6 +47,8 @@ public class NacosConsoleAuthConfig extends AbstractDynamicConfig implements Nac
      * Which auth system is in use.
      */
     private String nacosAuthSystemType;
+    
+    private boolean authSystemTypeInitialized;
     
     private String serverIdentityKey;
     
@@ -86,11 +94,23 @@ public class NacosConsoleAuthConfig extends AbstractDynamicConfig implements Nac
     protected void getConfigFromEnv() {
         authEnabled = EnvUtil.getProperty(Constants.Auth.NACOS_CORE_AUTH_CONSOLE_ENABLED,
             Boolean.class, true);
-        nacosAuthSystemType = EnvUtil.getProperty(Constants.Auth.NACOS_CORE_AUTH_SYSTEM_TYPE, "");
+        refreshAuthSystemType();
         serverIdentityKey =
             EnvUtil.getProperty(Constants.Auth.NACOS_CORE_AUTH_SERVER_IDENTITY_KEY, "");
         serverIdentityValue =
             EnvUtil.getProperty(Constants.Auth.NACOS_CORE_AUTH_SERVER_IDENTITY_VALUE, "");
+    }
+    
+    private void refreshAuthSystemType() {
+        String latestType = AuthPluginTypeResolver.resolve();
+        if (!authSystemTypeInitialized || DeploymentType.CONSOLE != EnvUtil.getDeploymentType()) {
+            nacosAuthSystemType = latestType;
+            authSystemTypeInitialized = true;
+        } else if (!nacosAuthSystemType.equals(latestType)) {
+            LOGGER.warn("[NacosConsoleAuthConfig] Ignore runtime auth plugin selection change "
+                + "from '{}' to '{}'; restart the Console to apply it.", nacosAuthSystemType,
+                latestType);
+        }
     }
     
     @Override

@@ -18,12 +18,16 @@ package com.alibaba.nacos.plugin.visibility.model;
 
 import com.alibaba.nacos.plugin.visibility.constant.VisibilityConstants;
 
+import java.io.Serializable;
+
 /**
  * Base class for resources that support visibility validation.
  *
  * @author xiweng.yy
  */
-public abstract class VisibilityResource {
+public abstract class VisibilityResource implements Serializable {
+    
+    private static final long serialVersionUID = 1L;
     
     private String scope = VisibilityConstants.SCOPE_PRIVATE;
     
@@ -44,7 +48,7 @@ public abstract class VisibilityResource {
     public abstract String getResourceName();
     
     /**
-     * Get the subtype of this resource, e.g. "skill", "mcp", "prompt", "a2a".
+     * Get the domain-specific category of this resource.
      *
      * @return resource type
      */

@@ -22,16 +22,22 @@ import com.alibaba.nacos.common.http.param.Query;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 /**
  * Integration tests for console config OpenAPI {@code /nacos/v3/console/cs/config}.
  *
  * <p>Scenario coverage:
  * <ul>
- *     <li>Expected capability: publish creates a config, republish updates content, query returns the console detail
+ *     <li>Expected capability: inherited optional source user and app name bind and persist; publish creates a config, republish updates content, query returns the console detail
  *     model, and delete removes the config.</li>
  *     <li>Boundary/validation: omitted namespaceId is stored as public, invalid config type is normalized to text,
- *     {@code dataId}, {@code groupName}, and {@code content} are required, and legacy {@code group} does not replace
- *     {@code groupName} for the v3 console API.</li>
+ *     {@code dataId}, {@code groupName}, and {@code content} are required, embedded dots remain valid in Config names,
+ *     directory control segments are rejected, and legacy {@code group} does not replace {@code groupName} for the v3
+ *     console API.</li>
  *     <li>Exception/error handling: absent console config queries return HTTP 200 with success and {@code data=null},
  *     while invalid namespace values return HTTP 400 rather than HTTP 500.</li>
  * </ul>
@@ -41,9 +47,32 @@ import org.junit.jupiter.api.Test;
 public class ConfigConsoleApiOpenApiITCase extends ConfigConsoleApiBaseITCase {
 
     @Test
+    public void testPublishConfigWithInheritedOptionalFields() throws Exception {
+        String dataId = randomDataId("binding");
+        String groupName = randomGroupName("binding");
+        String content = "binding=optional-fields";
+        Map<String, String> form = Map.of("dataId", dataId, "groupName", groupName,
+                "namespaceId", DEFAULT_NAMESPACE, "content", content,
+                "type", ConfigType.PROPERTIES.getType(), "desc", "binding description",
+                "configTags", "binding-tag", "srcUser", "form-source-user",
+                "appName", "form-binding-app");
+        addCleanup(() -> deleteConfigQuietly(dataId, groupName, DEFAULT_NAMESPACE));
+        JsonNode result = postFormOk(CONSOLE_CONFIG_PATH, form);
+        assertTrue(result.get("data").asBoolean(), result.toString());
+
+        JsonNode detail = queryConfig(dataId, groupName, DEFAULT_NAMESPACE).get("data");
+        assertConfigDetail(detail, dataId, groupName, DEFAULT_NAMESPACE, content,
+                ConfigType.PROPERTIES.getType());
+        assertEquals("form-source-user", detail.get("createUser").asText(), detail.toString());
+        assertEquals("form-binding-app", detail.get("appName").asText(), detail.toString());
+        assertConfigMetadata(detail, "binding description", "binding-tag");
+    }
+
+
+    @Test
     public void testPublishQueryRepublishAndDeleteConfig() throws Exception {
-        String dataId = randomDataId("crud");
-        String groupName = randomGroupName("crud");
+        String dataId = randomDataId("crud") + ".properties";
+        String groupName = randomGroupName("crud") + ".v1";
         String initialContent = "{\"name\":\"initial\"}";
         String description = "console config description";
         String tags = "console-tag-a,console-tag-b";
@@ -77,6 +106,25 @@ public class ConfigConsoleApiOpenApiITCase extends ConfigConsoleApiBaseITCase {
         assertError(postRaw(CONSOLE_CONFIG_PATH, Query.newInstance().addParam("dataId", dataId)
                 .addParam("group", groupName).addParam("content", "content")), 400,
                 ErrorCode.PARAMETER_MISSING, "groupName");
+    }
+
+    @Test
+    public void testPublishConfigRejectsDirectoryControlIdentitySegments() throws Exception {
+        String dataId = randomDataId("path-segment");
+        String groupName = randomGroupName("path-segment");
+        assertInvalidPublishIdentity(".", groupName, "", "dataId");
+        assertInvalidPublishIdentity("..", groupName, "", "dataId");
+        assertInvalidPublishIdentity(dataId, ".", "", "group");
+        assertInvalidPublishIdentity(dataId, "..", "", "group");
+        assertInvalidPublishIdentity(dataId, groupName, ".", "namespaceId");
+        assertInvalidPublishIdentity(dataId, groupName, "..", "namespaceId");
+    }
+
+    private void assertInvalidPublishIdentity(String dataId, String groupName, String namespaceId,
+            String expectedField) throws Exception {
+        Query query = Query.newInstance().addParam("dataId", dataId).addParam("groupName", groupName)
+                .addParam("namespaceId", namespaceId).addParam("content", "content");
+        assertError(postRaw(CONSOLE_CONFIG_PATH, query), 400, ErrorCode.PARAMETER_VALIDATE_ERROR, expectedField);
     }
 
     @Test

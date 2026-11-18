@@ -22,6 +22,8 @@ import com.alibaba.nacos.api.ai.model.skills.SkillResource;
 import com.alibaba.nacos.api.ai.model.skills.SkillUtils;
 import com.alibaba.nacos.api.exception.api.NacosApiException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -43,6 +45,49 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * @author nacos
  */
 class SkillZipParserTest {
+    
+    @Test
+    void testParseLiteralDescriptionDoesNotCreateNestedFields() {
+        String markdown = "---\nversion: 0.0.1\nname: alibabacloud-rds-copilot\ndescription: |\n"
+            + "  Alibaba Cloud RDS Copilot intelligent operations assistant skill.\n"
+            + "  Calls RdsAi OpenAPI through Alibaba Cloud CLI.\n"
+            + "  Triggers: \"RDS Copilot\", \"SQL optimization\"\n"
+            + "metadata:\n  version: 0.0.1\n---\nInstructions\n";
+        
+        Map<String, String> result = SkillZipParser.parseYamlFrontMatterFromMarkdown(markdown);
+        
+        assertEquals("Alibaba Cloud RDS Copilot intelligent operations assistant skill.\n"
+            + "Calls RdsAi OpenAPI through Alibaba Cloud CLI.\n"
+            + "Triggers: \"RDS Copilot\", \"SQL optimization\"\n", result.get("description"));
+        assertFalse(result.containsKey("description.Triggers"));
+        assertEquals("0.0.1", result.get("metadata.version"));
+    }
+    
+    @ParameterizedTest
+    @CsvSource({"|, 'first\nsecond\n'", "|-, 'first\nsecond'", "|+, 'first\nsecond\n\n'",
+        ">, 'first second\n'", ">-, 'first second'", ">+, 'first second\n\n'",
+        "|2-, 'first\nsecond'"})
+    void testParseBlockScalarStyles(String style, String expected) {
+        String markdown = "---\nname: test-skill\ndescription: " + style + " # description\n"
+            + "  first\n  second\n\n---\nInstructions\n";
+        assertEquals(expected,
+            SkillZipParser.parseYamlFrontMatterFromMarkdown(markdown).get("description"));
+    }
+    
+    @Test
+    void testParseBlockScalarPreservesParagraphsAndIndentedLines() {
+        String markdown = "---\nname: test-skill\ndescription: >-\n  first\n  line\n\n"
+            + "  paragraph\n    code: example\n  final\n---\nInstructions\n";
+        assertEquals("first line\nparagraph\n  code: example\nfinal",
+            SkillZipParser.parseYamlFrontMatterFromMarkdown(markdown).get("description"));
+    }
+    
+    @Test
+    void testQuotedBlockIndicatorRemainsLiteral() {
+        String markdown = "---\nname: test-skill\ndescription: \"|\"\n---\nInstructions\n";
+        assertEquals("|",
+            SkillZipParser.parseYamlFrontMatterFromMarkdown(markdown).get("description"));
+    }
     
     @Test
     void testParseSkillFromZipWithValidSkillMd() throws Exception {
@@ -454,6 +499,10 @@ class SkillZipParserTest {
         assertTrue(result.getSkills().isEmpty());
         assertEquals(1, result.getFailures().size());
         assertEquals("invalid-skill", result.getFailures().get(0).getFolder());
+        assertEquals("multi-skill/invalid-skill/",
+            result.getFailures().get(0).getEntryPath());
+        assertEquals(SkillZipParser.ParseFailureType.INVALID_SKILL,
+            result.getFailures().get(0).getType());
         assertTrue(result.getFailures().get(0).getReason().contains("YAML front matter"));
     }
     
@@ -485,21 +534,30 @@ class SkillZipParserTest {
         assertEquals(2, result.getFailures().size());
         assertTrue(result.getFailures().stream()
             .anyMatch(f -> "invalid-skill".equals(f.getFolder())
+                && "multi-skill/invalid-skill/".equals(f.getEntryPath())
+                && SkillZipParser.ParseFailureType.INVALID_SKILL == f.getType()
                 && f.getReason().contains("YAML front matter")));
         assertTrue(result.getFailures().stream()
             .anyMatch(f -> "not-a-skill".equals(f.getFolder())
+                && "multi-skill/not-a-skill/".equals(f.getEntryPath())
+                && SkillZipParser.ParseFailureType.NOT_A_SKILL == f.getType()
                 && f.getReason().contains("SKILL.md not found")));
     }
     
     @Test
-    void testParseMultipleSkillsFromZipWithNoSkillMd() throws IOException {
+    void testParseMultipleSkillsFromZipWithNoSkillMd() throws Exception {
         // Given: zip with no SKILL.md at all
         byte[] zipBytes = createZipWithoutSkillMd();
         
-        // When & Then
-        NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> SkillZipParser.parseMultipleSkillsFromZip(zipBytes, "test-namespace"));
-        assertTrue(exception.getMessage().contains("SKILL.md file not found"));
+        SkillZipParser.MultiSkillParseResult result =
+            SkillZipParser.parseMultipleSkillsFromZip(zipBytes, "test-namespace");
+        
+        assertTrue(result.getSkills().isEmpty());
+        assertEquals(1, result.getFailures().size());
+        assertEquals("", result.getFailures().get(0).getEntryPath());
+        assertEquals(SkillZipParser.ParseFailureType.NOT_A_SKILL,
+            result.getFailures().get(0).getType());
+        assertTrue(result.getFailures().get(0).getReason().contains("SKILL.md file not found"));
     }
     
     @Test

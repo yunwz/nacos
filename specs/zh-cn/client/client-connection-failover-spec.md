@@ -65,6 +65,16 @@ WAIT_INIT -> INITIALIZED -> STARTING -> RUNNING
 运行时应在启动阶段尝试同步建立初始连接。如果启动阶段无法在配置的重试预算内建立运行中连接，
 可以继续异步重连，但公开 SDK 调用必须按照领域契约暴露连接不可用状态。
 
+领域 Client 可以在“从未连接成功”的 `STARTING` 阶段暂停后台初始重连，但必须同时满足：
+
+- 领域契约声明了可用的替代传输；
+- 替代传输已经成功完成至少一次权威请求；
+- 初始异步重连已达到领域定义的探测预算。
+
+暂停只抑制新的初始 reconnect 信号以及正在执行的初始 reconnect 循环，不得把状态伪装为
+`RUNNING` 或 `UNHEALTHY`。显式 gRPC 模式、已经进入 `UNHEALTHY` 的连接，以及其他功能明确
+请求共享 gRPC 连接时都必须继续或恢复重连。公开请求不得等待该后台探测结束。
+
 触发 reconnect 的情况包括：
 
 - request stream error 或 completed；
@@ -96,6 +106,26 @@ HTTP 仍是兼容和部分操作的客户端传输方式。领域客户端可以
 
 HTTP fallback 必须由领域客户端显式定义。gRPC 请求失败后，不应自动通过 HTTP 修改资源状态，
 除非领域客户端已经定义该 fallback。
+
+共享的同步 Apache HTTP adapter 必须缓冲响应 entity 字节，不得经由字符串中转。
+这些字节是 Apache 完成既有内容解码后提供的 entity 字节，不是 HTTP 帧或压缩后的网络字节。
+未声明 charset 不得导致 UTF-8 JSON 或二进制数据损坏。内容消费者继续使用既有的解析和
+字符集策略。adapter 必须保留既有状态码和 header 表示，并在 response-handler 生命周期内
+完成网络响应的消费与关闭，包括响应处理失败的情况。
+
+### 5.1 HTTP 请求 ID
+
+Java Client SDK 的公共、Config 和 Naming HTTP client（包括复用它们的 AI 请求）在每次
+执行请求时，必须生成 UUID 并写入 `Nacos-Request-Id` header。SDK 发起重试、故障切换或
+下一次长轮询时生成新的 ID；底层 HTTP 实现内部的重放可以保留同一 ID。
+该 header 由 SDK 管理，即使请求携带已有值，也在发送时替换，且不得修改调用方传入的
+header 对象或共享 `Header.EMPTY`。
+
+请求 ID 只用于请求关联，不是 Client Id、鉴权凭证或幂等键。已有 `RequestId`、Client Id、
+`Request-Module` 等 header 保持原有行为。服务端按
+[请求上下文规范](../design/foundation-request-context-spec.md)读取该 header；客户端不依赖
+服务端回显或支持该 header，因此仍可访问旧服务端。
+直接访问外部 OIDC provider 的 HTTP 连接不属于此约定的范围。
 
 ## 6. TLS
 

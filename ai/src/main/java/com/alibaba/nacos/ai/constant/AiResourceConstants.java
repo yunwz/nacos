@@ -26,6 +26,17 @@ package com.alibaba.nacos.ai.constant;
  */
 public final class AiResourceConstants {
     
+    public static final String RESOURCE_TYPE_SKILL = "skill";
+    
+    public static final String RESOURCE_TYPE_PROMPT = "prompt";
+    
+    public static final String RESOURCE_TYPE_MCP = "mcp";
+    
+    /**
+     * Current MCP search projection generation used by indexing and managed cutover.
+     */
+    public static final int MCP_SEARCH_PROJECTION_VERSION = 3;
+    
     private AiResourceConstants() {
     }
     
@@ -55,7 +66,7 @@ public final class AiResourceConstants {
     public static final String VERSION_STATUS_REVIEWING = "reviewing";
     
     /**
-     * Version status: version has been reviewed (pipeline approved, awaiting publish).
+     * Version status: version has completed pipeline review and awaits the next action.
      */
     public static final String VERSION_STATUS_REVIEWED = "reviewed";
     

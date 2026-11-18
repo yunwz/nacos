@@ -17,7 +17,9 @@
 package com.alibaba.nacos.ai.service;
 
 import com.alibaba.nacos.plugin.visibility.constant.VisibilityConstants;
-import com.alibaba.nacos.plugin.visibility.spi.VisibilityPluginManager;
+import com.alibaba.nacos.core.plugin.visibility.VisibilityPluginManager;
+import com.alibaba.nacos.plugin.visibility.model.VisibilityResource;
+import com.alibaba.nacos.plugin.visibility.spi.ValidationResult;
 import com.alibaba.nacos.plugin.visibility.spi.VisibilityService;
 import com.alibaba.nacos.sys.env.EnvUtil;
 import org.junit.jupiter.api.AfterEach;
@@ -26,19 +28,35 @@ import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.StandardEnvironment;
+import com.alibaba.nacos.ai.form.AiResourceFilterableForm;
+import com.alibaba.nacos.ai.form.agent.admin.AgentScopeForm;
+import com.alibaba.nacos.ai.form.agentspecs.admin.AgentSpecScopeForm;
+import com.alibaba.nacos.ai.form.skills.admin.SkillScopeForm;
+import com.alibaba.nacos.api.exception.api.NacosApiException;
+import com.alibaba.nacos.plugin.visibility.model.VisibilityScopeDefinition;
 
 import java.lang.reflect.Field;
 import java.util.Optional;
+import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class VisibilityHelperTest {
     
     private static final ConfigurableEnvironment CACHED_ENVIRONMENT = EnvUtil.getEnvironment();
+    
+    private static final String[] RESOURCE_TYPES =
+        {"agent", "mcp", "skill", "prompt", "agentspec", "unknown"};
     
     private MockedStatic<VisibilityPluginManager> visibilityManagerStatic;
     
@@ -67,30 +85,66 @@ class VisibilityHelperTest {
     void resolveDefaultScopeForCreateShouldFallbackToPrivateWhenPluginAbsent() {
         when(visibilityPluginManager.findVisibilityService(anyString()))
             .thenReturn(Optional.empty());
-        String actual = VisibilityHelper.resolveDefaultScopeForCreate("skill");
-        assertEquals(VisibilityConstants.SCOPE_PRIVATE, actual);
+        for (String resourceType : RESOURCE_TYPES) {
+            assertEquals(VisibilityConstants.SCOPE_PRIVATE,
+                VisibilityHelper.resolveDefaultScopeForCreate(resourceType));
+        }
     }
     
     @Test
     void resolveDefaultScopeForCreateShouldUsePluginScopeAndNormalizeUppercase() {
         VisibilityService visibilityService = mock(VisibilityService.class);
-        when(visibilityService.resolveDefaultScopeForCreate(anyString(), anyString(), anyString()))
-            .thenReturn("public");
         when(visibilityPluginManager.findVisibilityService(anyString()))
             .thenReturn(Optional.of(visibilityService));
-        String actual = VisibilityHelper.resolveDefaultScopeForCreate("skill");
-        assertEquals(VisibilityConstants.SCOPE_PUBLIC, actual);
+        for (String scope : new String[] {"public", "private"}) {
+            when(visibilityService.resolveDefaultScopeForCreate(anyString(), anyString(),
+                anyString())).thenReturn(scope);
+            for (String resourceType : RESOURCE_TYPES) {
+                assertEquals(scope.toUpperCase(java.util.Locale.ROOT),
+                    VisibilityHelper.resolveDefaultScopeForCreate(resourceType));
+            }
+        }
     }
     
     @Test
     void resolveDefaultScopeForCreateShouldFallbackToPrivateWhenPluginReturnsBlank() {
         VisibilityService visibilityService = mock(VisibilityService.class);
-        when(visibilityService.resolveDefaultScopeForCreate(anyString(), anyString(), anyString()))
-            .thenReturn("  ");
         when(visibilityPluginManager.findVisibilityService(anyString()))
             .thenReturn(Optional.of(visibilityService));
-        String actual = VisibilityHelper.resolveDefaultScopeForCreate("skill");
-        assertEquals(VisibilityConstants.SCOPE_PRIVATE, actual);
+        for (String scope : new String[] {null, "", "  "}) {
+            when(visibilityService.resolveDefaultScopeForCreate(anyString(), anyString(),
+                anyString())).thenReturn(scope);
+            for (String resourceType : RESOURCE_TYPES) {
+                assertEquals(VisibilityConstants.SCOPE_PRIVATE,
+                    VisibilityHelper.resolveDefaultScopeForCreate(resourceType));
+            }
+        }
+    }
+    
+    @Test
+    void canReadResourceWithCapturedOwnerShouldAllowWhenPluginAbsent() {
+        when(visibilityPluginManager.findVisibilityService(anyString()))
+            .thenReturn(Optional.empty());
+        
+        assertTrue(VisibilityHelper.canReadResource(mock(VisibilityResource.class)));
+        assertTrue(VisibilityHelper.canReadResource("identity", "open-api",
+            mock(VisibilityResource.class)));
+    }
+    
+    @Test
+    void canReadResourceWithCapturedOwnerShouldDelegateExactContext() {
+        VisibilityService visibilityService = mock(VisibilityService.class);
+        VisibilityResource resource = mock(VisibilityResource.class);
+        when(visibilityPluginManager.findVisibilityService(anyString()))
+            .thenReturn(Optional.of(visibilityService));
+        when(visibilityService.validateVisibility("identity", VisibilityConstants.ACTION_READ,
+            "open-api", resource)).thenReturn(ValidationResult.deny("private"));
+        
+        assertFalse(VisibilityHelper.canReadResource("identity", "open-api", resource));
+        verify(visibilityService).validateVisibility("identity",
+            VisibilityConstants.ACTION_READ, "open-api", resource);
+        verify(visibilityService).validateVisibility(anyString(), anyString(), anyString(),
+            any(VisibilityResource.class));
     }
     
     private static void resetCachedVisibilityServiceName() throws Exception {
@@ -98,4 +152,40 @@ class VisibilityHelperTest {
         field.setAccessible(true);
         field.set(null, null);
     }
+    
+    @Test
+    void scopeDeclarationsFollowSelectedPluginAndFormsShareValidation() throws Exception {
+        VisibilityService service = mock(VisibilityService.class);
+        when(service.getAdditionalScopes()).thenReturn(List.of(
+            new VisibilityScopeDefinition("TEAM_EDIT", true)));
+        when(visibilityPluginManager.findVisibilityService(anyString()))
+            .thenReturn(Optional.of(service));
+        assertEquals(Set.of("PUBLIC", "PRIVATE", "TEAM_EDIT"),
+            VisibilityHelper.scopeRegistry().getScopeNames());
+        SkillScopeForm skill = new SkillScopeForm();
+        skill.setSkillName("my-skill");
+        skill.setScope("team_edit");
+        skill.validate();
+        AgentSpecScopeForm agentSpec = new AgentSpecScopeForm();
+        agentSpec.setAgentSpecName("my-agent");
+        agentSpec.setScope("TEAM_EDIT");
+        agentSpec.validate();
+        AiResourceFilterableForm filter = new AiResourceFilterableForm();
+        filter.setScope("TEAM_EDIT");
+        filter.validate();
+        AgentScopeForm agent = new AgentScopeForm();
+        agent.setAgentName("scope-extension");
+        agent.setScope("team_edit");
+        agent.validate();
+        when(visibilityPluginManager.findVisibilityService(anyString()))
+            .thenReturn(Optional.empty());
+        assertThrows(NacosApiException.class, skill::validate);
+        assertThrows(NacosApiException.class, agentSpec::validate);
+        assertThrows(NacosApiException.class, filter::validate);
+        assertThrows(NacosApiException.class, agent::validate);
+        filter.setScope(null);
+        filter.validate();
+        assertEquals(Set.of("PUBLIC", "PRIVATE"), VisibilityHelper.scopeRegistry().getScopeNames());
+    }
+    
 }

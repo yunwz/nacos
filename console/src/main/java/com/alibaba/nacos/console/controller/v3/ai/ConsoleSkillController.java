@@ -37,7 +37,6 @@ import com.alibaba.nacos.ai.utils.SkillRequestUtil;
 import com.alibaba.nacos.api.ai.model.skills.Skill;
 import com.alibaba.nacos.api.ai.model.skills.SkillMeta;
 import com.alibaba.nacos.api.ai.model.skills.SkillSummary;
-import com.alibaba.nacos.api.ai.model.skills.SkillUploadPrecheckRequest;
 import com.alibaba.nacos.api.ai.model.skills.SkillUploadPrecheckResult;
 import com.alibaba.nacos.api.annotation.NacosApi;
 import com.alibaba.nacos.api.common.ApiType;
@@ -57,13 +56,11 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
-import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.util.Collections;
 import java.util.List;
 
 import static com.alibaba.nacos.plugin.auth.constant.Constants.Resource.CONSOLE_RESOURCE_NAME_PREFIX;
@@ -205,31 +202,25 @@ public class ConsoleSkillController {
     }
     
     /**
-     * Batch precheck multiple skill uploads from client-parsed metadata.
+     * Precheck one or more skill uploads from a zip file.
      *
      * @param request HTTP servlet request
-     * @param precheckRequests list of upload precheck requests
-     * @return list of precheck results in the same order as input
-     * @throws NacosException if precheck failed unexpectedly
+     * @param namespaceId namespace ID
+     * @param file zip file containing one skill or multiple skill subdirectories
+     * @return list of precheck results
+     * @throws NacosException if zip parsing fails entirely
      */
-    @Since("3.2.3")
-    @PostMapping(value = "/upload/batch/precheck")
+    @Since("3.3.0")
+    @PostMapping(value = "/upload/precheck", consumes = "multipart/form-data")
     @Secured(action = ActionTypes.WRITE, signType = SignType.AI, apiType = ApiType.CONSOLE_API)
     @ExtractorManager.Extractor(httpExtractor = ExtractorManager.DefaultHttpExtractor.class)
-    public Result<List<SkillUploadPrecheckResult>> batchPrecheckUploadSkill(
+    public Result<List<SkillUploadPrecheckResult>> precheckUploadSkill(
         HttpServletRequest request,
-        @RequestBody(required = false) List<SkillUploadPrecheckRequest> precheckRequests)
-        throws NacosException {
-        if (precheckRequests == null || precheckRequests.isEmpty()) {
-            return Result.success(Collections.emptyList());
-        }
-        for (SkillUploadPrecheckRequest req : precheckRequests) {
-            if (req != null) {
-                req.setNamespaceId(
-                    NamespaceUtil.processNamespaceParameter(req.getNamespaceId()));
-            }
-        }
-        return Result.success(skillProxy.batchPrecheckUploadSkill(precheckRequests));
+        @RequestParam(value = "namespaceId", required = false) String namespaceId,
+        @RequestParam("file") MultipartFile file) throws NacosException {
+        namespaceId = NamespaceUtil.processNamespaceParameter(namespaceId);
+        byte[] zipBytes = SkillRequestUtil.validateAndExtractZipBytes(file);
+        return Result.success(skillProxy.precheckUploadSkillFromZip(namespaceId, zipBytes));
     }
     
     /**
@@ -240,7 +231,7 @@ public class ConsoleSkillController {
      * @param namespaceId namespace ID
      * @param overwrite   whether to overwrite existing drafts
      * @param file        zip file containing multiple skill subdirectories
-     * @return batch upload result with succeeded and failed lists
+     * @return batch upload result with per-skill results
      * @throws NacosException if zip parsing fails entirely
      */
     @Since("3.2.2")
@@ -324,7 +315,7 @@ public class ConsoleSkillController {
     @Since("3.2.1")
     @PostMapping("/force-publish")
     @Secured(resource = CONSOLE_RESOURCE_NAME_PREFIX
-        + "skills", action = ActionTypes.WRITE, signType = SignType.CONSOLE,
+        + "skills", action = ActionTypes.WRITE, signType = SignType.AI,
         apiType = ApiType.CONSOLE_API)
     public Result<String> forcePublish(SkillPublishForm form) throws NacosException {
         form.validate();

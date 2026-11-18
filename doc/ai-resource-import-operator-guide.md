@@ -229,7 +229,8 @@ environments.
 ## Legacy MCP Registry Import API
 
 The unified import API is the default path for the new console. Legacy MCP
-registry import endpoints are disabled by default:
+registry import endpoints are deprecated, disabled by default, and retained
+only through Nacos 3.3.x. They are planned for removal in Nacos 3.4.0:
 
 ```text
 POST /v3/console/ai/mcp/import/validate
@@ -239,14 +240,18 @@ POST /v3/console/ai/mcp/import/execute
 Operators may reopen them temporarily during a migration window:
 
 ```properties
-nacos.ai.resource.import.legacy-mcp-api-enabled=true
+nacos.core.api.compatibility.enabled=true
 ```
+
+The former `nacos.ai.resource.import.legacy-mcp-api-enabled` property is no
+longer recognized. The shared switch also reopens other explicitly gated
+deprecated v3 APIs; use it only during a controlled migration window.
 
 Legacy direct URL import remains disabled even when the legacy endpoints are
 enabled. It should only be reopened in controlled deployments:
 
 ```properties
-nacos.ai.resource.import.legacy-mcp-api-enabled=true
+nacos.core.api.compatibility.enabled=true
 nacos.ai.resource.import.allow-user-url=true
 ```
 

@@ -18,11 +18,13 @@
 package com.alibaba.nacos.plugin.auth.impl.controller.v3;
 
 import com.alibaba.nacos.api.annotation.Since;
+import com.alibaba.nacos.api.common.ApiType;
 import com.alibaba.nacos.api.common.Constants;
 import com.alibaba.nacos.api.model.Page;
 import com.alibaba.nacos.api.model.v2.ErrorCode;
 import com.alibaba.nacos.api.model.v2.Result;
 import com.alibaba.nacos.auth.annotation.Secured;
+import com.alibaba.nacos.auth.config.NacosAuthConfig;
 import com.alibaba.nacos.auth.config.NacosAuthConfigHolder;
 import com.alibaba.nacos.common.utils.StringUtils;
 import com.alibaba.nacos.core.context.RequestContextHolder;
@@ -30,7 +32,6 @@ import com.alibaba.nacos.plugin.auth.api.IdentityContext;
 import com.alibaba.nacos.plugin.auth.constant.ActionTypes;
 import com.alibaba.nacos.plugin.auth.exception.AccessException;
 import com.alibaba.nacos.plugin.auth.impl.authenticate.IAuthenticationManager;
-import com.alibaba.nacos.plugin.auth.impl.configuration.AuthConfigs;
 import com.alibaba.nacos.plugin.auth.impl.constant.AuthConstants;
 import com.alibaba.nacos.plugin.auth.impl.constant.AuthSystemTypes;
 import com.alibaba.nacos.plugin.auth.impl.persistence.RoleInfo;
@@ -43,6 +44,7 @@ import com.alibaba.nacos.plugin.auth.impl.utils.PasswordGeneratorUtil;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.HttpSessionRequiredException;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -70,8 +72,6 @@ public class UserControllerV3 {
     
     private final NacosRoleService roleService;
     
-    private final AuthConfigs authConfigs;
-    
     private final IAuthenticationManager iAuthenticationManager;
     
     private final TokenManagerDelegate jwtTokenManager;
@@ -83,16 +83,13 @@ public class UserControllerV3 {
      *
      * @param userDetailsService     the service for user details operations
      * @param roleService            the service for role operations
-     * @param authConfigs            the authentication configuration
      * @param iAuthenticationManager the authentication manager interface
      * @param jwtTokenManager        the JWT token manager
      */
     public UserControllerV3(NacosUserService userDetailsService, NacosRoleService roleService,
-        AuthConfigs authConfigs,
         IAuthenticationManager iAuthenticationManager, TokenManagerDelegate jwtTokenManager) {
         this.userDetailsService = userDetailsService;
         this.roleService = roleService;
-        this.authConfigs = authConfigs;
         this.iAuthenticationManager = iAuthenticationManager;
         this.jwtTokenManager = jwtTokenManager;
     }
@@ -107,7 +104,7 @@ public class UserControllerV3 {
      * @since 1.2.0
      */
     @Secured(resource = AuthConstants.CONSOLE_RESOURCE_NAME_PREFIX + "users",
-        action = ActionTypes.WRITE)
+        action = ActionTypes.WRITE, apiType = ApiType.ADMIN_API)
     @Since("3.0.0")
     @PostMapping
     public Result<String> createUser(@RequestParam String username, @RequestParam String password) {
@@ -130,7 +127,8 @@ public class UserControllerV3 {
             password = PasswordGeneratorUtil.generateRandomPassword();
         }
         
-        if (AuthSystemTypes.NACOS.name().equalsIgnoreCase(authConfigs.getNacosAuthSystemType())) {
+        if (AuthSystemTypes.NACOS.name()
+            .equalsIgnoreCase(getServerAuthConfig().getNacosAuthSystemType())) {
             if (iAuthenticationManager.hasGlobalAdminRole()) {
                 return Result.failure(HttpStatus.CONFLICT.value(), "have admin user cannot use it.",
                     null);
@@ -158,7 +156,7 @@ public class UserControllerV3 {
     @Since("3.0.0")
     @DeleteMapping
     @Secured(resource = AuthConstants.CONSOLE_RESOURCE_NAME_PREFIX + "users",
-        action = ActionTypes.WRITE)
+        action = ActionTypes.WRITE, apiType = ApiType.ADMIN_API)
     public Result<String> deleteUser(@RequestParam String username) {
         List<RoleInfo> roleInfoList = roleService.getRoles(username);
         if (roleInfoList != null) {
@@ -188,7 +186,8 @@ public class UserControllerV3 {
     @Secured(resource = AuthConstants.UPDATE_PASSWORD_ENTRY_POINT, action = ActionTypes.WRITE,
         tags = {
             com.alibaba.nacos.plugin.auth.constant.Constants.Tag.ONLY_IDENTITY,
-            AuthConstants.UPDATE_PASSWORD_ENTRY_POINT})
+            AuthConstants.UPDATE_PASSWORD_ENTRY_POINT},
+        apiType = ApiType.ADMIN_API)
     public Result<String> updateUser(@RequestParam String username,
         @RequestParam String newPassword,
         HttpServletResponse response, HttpServletRequest request) throws IOException {
@@ -259,7 +258,7 @@ public class UserControllerV3 {
     @Since("3.0.0")
     @GetMapping("/list")
     @Secured(resource = AuthConstants.CONSOLE_RESOURCE_NAME_PREFIX + "users",
-        action = ActionTypes.READ)
+        action = ActionTypes.READ, apiType = ApiType.ADMIN_API)
     public Result<Page<User>> getUserList(@RequestParam int pageNo, @RequestParam int pageSize,
         @RequestParam(name = "username", required = false, defaultValue = "") String username,
         @RequestParam(name = "search", required = false, defaultValue = "accurate") String search) {
@@ -281,7 +280,7 @@ public class UserControllerV3 {
     @Since("3.0.0")
     @GetMapping("/search")
     @Secured(resource = AuthConstants.CONSOLE_RESOURCE_NAME_PREFIX + "users",
-        action = ActionTypes.WRITE)
+        action = ActionTypes.WRITE, apiType = ApiType.ADMIN_API)
     public Result<List<String>> getUserListByUsername(@RequestParam String username) {
         List<String> userList = userDetailsService.findUserNames(username);
         return Result.success(userList);
@@ -301,10 +300,16 @@ public class UserControllerV3 {
     @PostMapping("/login")
     public Object login(HttpServletResponse response, HttpServletRequest request)
         throws AccessException, IOException {
-        if (AuthSystemTypes.NACOS.name().equalsIgnoreCase(authConfigs.getNacosAuthSystemType())
-            || AuthSystemTypes.LDAP.name().equalsIgnoreCase(authConfigs.getNacosAuthSystemType())) {
-            
-            NacosUser user = iAuthenticationManager.authenticate(request);
+        String authSystemType = getServerAuthConfig().getNacosAuthSystemType();
+        if (AuthSystemTypes.NACOS.name().equalsIgnoreCase(authSystemType)
+            || AuthSystemTypes.LDAP.name().equalsIgnoreCase(authSystemType)) {
+            NacosUser user;
+            try {
+                user = iAuthenticationManager.authenticate(request);
+            } catch (AccessException ignored) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body(AuthConstants.INVALID_CREDENTIALS_MESSAGE);
+            }
             
             response.addHeader(AuthConstants.AUTHORIZATION_HEADER,
                 AuthConstants.TOKEN_PREFIX + user.getToken());
@@ -322,8 +327,14 @@ public class UserControllerV3 {
     }
     
     private boolean isFromServerIdentity(HttpServletRequest request) {
-        String serverIdentityKey = authConfigs.getServerIdentityKey();
+        NacosAuthConfig authConfig = getServerAuthConfig();
+        String serverIdentityKey = authConfig.getServerIdentityKey();
         String serverIdentityValue = request.getHeader(serverIdentityKey);
-        return authConfigs.getServerIdentityValue().equals(serverIdentityValue);
+        return authConfig.getServerIdentityValue().equals(serverIdentityValue);
+    }
+    
+    private NacosAuthConfig getServerAuthConfig() {
+        return NacosAuthConfigHolder.getInstance()
+            .getNacosAuthConfigByScope(ApiType.OPEN_API.name());
     }
 }

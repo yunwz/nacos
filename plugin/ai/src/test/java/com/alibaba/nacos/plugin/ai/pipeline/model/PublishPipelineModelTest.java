@@ -81,6 +81,10 @@ class PublishPipelineModelTest {
             new SkillPipelineContext().getResourceType());
         assertEquals(PublishPipelineResourceType.AGENTSPEC,
             new AgentSpecPipelineContext().getResourceType());
+        assertEquals(PublishPipelineResourceType.MCP,
+            PublishPipelineResourceType.valueOf("MCP"));
+        assertEquals(PublishPipelineResourceType.AGENT,
+            PublishPipelineResourceType.valueOf("AGENT"));
     }
     
     @Test

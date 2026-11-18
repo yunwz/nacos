@@ -16,13 +16,21 @@
 
 package com.alibaba.nacos.plugin.ai.storage;
 
+import com.alibaba.nacos.api.plugin.PluginStateCheckerHolder;
+import com.alibaba.nacos.api.plugin.PluginType;
 import com.alibaba.nacos.common.JustForTest;
+import com.alibaba.nacos.common.spi.PluginRegistryUtils;
 import com.alibaba.nacos.common.utils.StringUtils;
 import com.alibaba.nacos.plugin.ai.storage.model.StorageKey;
 import com.alibaba.nacos.plugin.ai.storage.spi.AiResourceStorage;
+import com.alibaba.nacos.plugin.ai.storage.spi.AiResourceStorageChangeListener;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -40,10 +48,15 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class AiResourceStorageRouter {
     
+    private static final Logger LOGGER = LoggerFactory.getLogger(AiResourceStorageRouter.class);
+    
     private static final AiResourceStorageRouter INSTANCE = new AiResourceStorageRouter();
     
     private static final Map<String, AiResourceStorage> STORAGES_BY_TYPE =
         new ConcurrentHashMap<>(8);
+    
+    private final Set<AiResourceStorageChangeListener> changeListeners =
+        new LinkedHashSet<AiResourceStorageChangeListener>();
     
     private AiResourceStorageRouter() {
         // Storage implementations are registered via join() by external initializer
@@ -68,6 +81,11 @@ public class AiResourceStorageRouter {
         if (storageKey == null || StringUtils.isBlank(storageKey.getProvider())) {
             throw new IllegalArgumentException("StorageKey.provider is blank");
         }
+        if (!PluginStateCheckerHolder.isPluginEnabled(PluginType.AI_STORAGE.getType(),
+            storageKey.getProvider())) {
+            throw new IllegalStateException(
+                "AiResourceStorage plugin is disabled: " + storageKey.getProvider());
+        }
         AiResourceStorage storage = STORAGES_BY_TYPE.get(storageKey.getProvider());
         if (storage == null) {
             throw new IllegalStateException(
@@ -81,23 +99,88 @@ public class AiResourceStorageRouter {
     }
     
     /**
-     * Add/override a storage implementation at runtime.
+     * Attach one listener to every current and subsequently joined storage provider.
      *
-     * <p>Mainly for tests or embedding scenarios. If the same type already exists, it will be overridden.</p>
+     * @param listener listener to attach
+     */
+    public synchronized void addChangeListener(AiResourceStorageChangeListener listener) {
+        if (listener == null || !changeListeners.add(listener)) {
+            return;
+        }
+        for (AiResourceStorage storage : STORAGES_BY_TYPE.values()) {
+            attachListener(storage, listener);
+        }
+    }
+    
+    /**
+     * Detach one listener from every current storage provider.
+     *
+     * @param listener listener to detach
+     */
+    public synchronized void removeChangeListener(AiResourceStorageChangeListener listener) {
+        if (listener == null || !changeListeners.remove(listener)) {
+            return;
+        }
+        for (AiResourceStorage storage : STORAGES_BY_TYPE.values()) {
+            detachListener(storage, listener);
+        }
+    }
+    
+    /**
+     * Register a storage implementation at runtime using first-wins semantics.
+     *
+     * <p>Mainly for tests or embedding scenarios. A duplicate type is ignored with a warning.</p>
      *
      * @param storage storage implementation
      * @return true if storage is joined
      */
-    public static synchronized boolean join(AiResourceStorage storage) {
-        if (storage == null || StringUtils.isBlank(storage.type())) {
-            return false;
+    public static boolean join(AiResourceStorage storage) {
+        synchronized (INSTANCE) {
+            String type = storage == null ? null : storage.type();
+            boolean joined = PluginRegistryUtils.registerFirst(STORAGES_BY_TYPE,
+                PluginType.AI_STORAGE.getType(), type, storage, LOGGER);
+            if (joined) {
+                for (AiResourceStorageChangeListener listener : INSTANCE.changeListeners) {
+                    INSTANCE.attachListener(storage, listener);
+                }
+            }
+            return joined;
         }
-        STORAGES_BY_TYPE.put(storage.type(), storage);
-        return true;
     }
     
+    /**
+     * Detach listeners and clear registered storages for isolated tests.
+     */
     @JustForTest
-    public static synchronized void reset() {
-        STORAGES_BY_TYPE.clear();
+    public static void reset() {
+        synchronized (INSTANCE) {
+            for (AiResourceStorage storage : STORAGES_BY_TYPE.values()) {
+                for (AiResourceStorageChangeListener listener : INSTANCE.changeListeners) {
+                    INSTANCE.detachListener(storage, listener);
+                }
+            }
+            STORAGES_BY_TYPE.clear();
+            INSTANCE.changeListeners.clear();
+        }
+    }
+    
+    private void attachListener(AiResourceStorage storage,
+        AiResourceStorageChangeListener listener) {
+        try {
+            storage.addChangeListener(listener);
+        } catch (RuntimeException e) {
+            LOGGER.warn("Failed to attach AI storage change listener to provider {}",
+                storage.type(), e);
+        }
+    }
+    
+    private void detachListener(AiResourceStorage storage,
+        AiResourceStorageChangeListener listener) {
+        try {
+            storage.removeChangeListener(listener);
+        } catch (RuntimeException e) {
+            LOGGER.warn("Failed to detach AI storage change listener from provider {}",
+                storage.type(), e);
+        }
     }
 }

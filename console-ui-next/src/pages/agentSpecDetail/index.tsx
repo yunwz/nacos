@@ -20,7 +20,6 @@ import {
   PowerOff,
   Trash2,
   Pencil,
-  Lock,
   Save,
   X,
   AlertCircle,
@@ -30,7 +29,6 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Switch } from '@/components/ui/switch';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -60,6 +58,7 @@ import {
 } from '@/components/ui/sheet';
 import { useAgentSpecStore } from '@/stores/agentspec-store';
 import { useNamespaceStore } from '@/stores/namespace-store';
+import { useAuthStore } from '@/stores/auth-store';
 import { agentSpecApi } from '@/api/agentspec';
 import { parseBizTags, parsePipelineInfo, type AgentSpecDocument, type AgentSpecResource, type AgentSpecVersionSummary } from '@/types/agentspec';
 import { cn } from '@/lib/utils';
@@ -72,7 +71,10 @@ import { LabelBindDialog } from '@/components/ai/LabelBindDialog';
 import { BizTagEditDialog } from '@/components/ai/BizTagEditDialog';
 import { PipelineStatusDisplay } from '../skillManagement/components/PipelineStatusDisplay';
 import { DetailTagChip } from '@/components/ai/DetailTagChip';
+import { AiResourceStatusControls } from '@/components/ai/AiResourceStatusControls';
 import { CliCommandCard } from '@/components/ai/CliCommandCard';
+import { VisibilityAuthorizationDialog } from '@/components/ai/VisibilityAuthorizationDialog';
+import { canResubmitReview } from '@/components/ai/version-lifecycle';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   resolveCreateLocation,
@@ -96,6 +98,7 @@ export default function AgentSpecDetailPage() {
     searchParams.get('namespace') ||
     currentNamespace ||
     'public';
+  const { globalAdmin, username } = useAuthStore();
 
   const {
     currentDetail,
@@ -114,6 +117,7 @@ export default function AgentSpecDetailPage() {
   const [bizTagDialogOpen, setBizTagDialogOpen] = useState(false);
   const [enableToggling, setEnableToggling] = useState(false);
   const [scopeToggling, setScopeToggling] = useState(false);
+  const [visibilityDialogOpen, setVisibilityDialogOpen] = useState(false);
   const [bizTags, setBizTags] = useState<string[]>([]);
 
   // Draft editing state
@@ -479,6 +483,7 @@ export default function AgentSpecDetailPage() {
   const currentVersionSummary = versionOptions.find((item) => item.version === selectedVersion);
   const currentVersionStatus = currentVersionSummary?.status;
   const currentPipelineInfo = parsePipelineInfo(currentVersionSummary?.publishPipelineInfo);
+  const showResubmitReview = canResubmitReview(currentVersionStatus, currentPipelineInfo);
   const currentVersionStatusLabel = currentVersionStatus
     ? t(`agentSpec.versionStatus.${currentVersionStatus}`)
     : '-';
@@ -824,6 +829,8 @@ export default function AgentSpecDetailPage() {
     setCreateNodeFallbackType(value);
     setCreateNodePath(nextPath);
   };
+  const canManageVisibility = globalAdmin || detail.owner === username;
+  const canWriteResource = detail.writable;
 
   return (
     <div className="flex min-h-[calc(100vh-88px)] flex-col gap-5 pb-5">
@@ -920,39 +927,25 @@ export default function AgentSpecDetailPage() {
                   </span>
                 )}
               </div>
-              {/* Enable toggle switch */}
-              <div className="flex items-center gap-4 mt-1.5 mb-1">
-                <label className="inline-flex items-center gap-2 cursor-pointer select-none">
-                  <Switch
-                    checked={detail.enable}
-                    disabled={enableToggling}
-                    onCheckedChange={handleToggleEnable}
-                    className={cn(
-                      detail.enable
-                        ? 'data-[state=checked]:bg-emerald-500'
-                        : '',
-                    )}
-                  />
-                  <span className={cn(
-                    'text-xs font-medium',
-                    detail.enable ? 'text-emerald-700 dark:text-emerald-300' : 'text-muted-foreground',
-                  )}>
-                    {detail.enable ? t('agentSpec.enabled') : t('agentSpec.disabled')}
-                  </span>
-                </label>
-                <div className="h-4 w-px bg-border" />
-                <label className="inline-flex items-center gap-2 cursor-pointer select-none">
-                  <Switch
-                    checked={detail.scope === 'PUBLIC'}
-                    disabled={scopeToggling}
-                    onCheckedChange={handleToggleScope}
-                  />
-                  <span className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground">
-                    {detail.scope === 'PUBLIC' ? <Globe className="h-3 w-3" /> : <Lock className="h-3 w-3" />}
-                    {detail.scope === 'PUBLIC' ? t('agentSpec.scopePublic') : t('agentSpec.scopePrivate')}
-                  </span>
-                </label>
-              </div>
+              <AiResourceStatusControls
+                enabled={detail.enable}
+                scope={detail.scope}
+                enabledLabel={t('agentSpec.enabled')}
+                disabledLabel={t('agentSpec.disabled')}
+                publicLabel={t('agentSpec.scopePublic')}
+                privateLabel={t('agentSpec.scopePrivate')}
+                enableDisabled={enableToggling || !canWriteResource}
+                scopeDisabled={scopeToggling || !canWriteResource}
+                onEnabledChange={handleToggleEnable}
+                onScopeChange={handleToggleScope}
+                visibilityLabel={canManageVisibility
+                  ? t('common.visibilityAuthorization.entry')
+                  : undefined}
+                visibilityTooltip={t('common.visibilityAuthorization.title')}
+                onVisibilityClick={canManageVisibility
+                  ? () => setVisibilityDialogOpen(true)
+                  : undefined}
+              />
               {/* Description - editable in draft mode */}
               {isEditingDraft ? (
                 <Textarea
@@ -998,7 +991,7 @@ export default function AgentSpecDetailPage() {
               </div>
 
               {/* Version lifecycle action buttons */}
-              {selectedVersion && currentVersionStatus && (
+              {canWriteResource && selectedVersion && currentVersionStatus && (
                 <div className="mt-3 pt-3 border-t border-border/40">
                   <div className="flex items-center gap-2">
                   {/* Draft actions */}
@@ -1070,6 +1063,18 @@ export default function AgentSpecDetailPage() {
                   {/* Reviewing / Reviewed actions */}
                   {(currentVersionStatus === 'reviewing' || currentVersionStatus === 'reviewed') && (
                     <>
+                      {showResubmitReview && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-xs gap-1.5"
+                          disabled={actionLoading}
+                          onClick={() => handleSubmit(selectedVersion)}
+                        >
+                          <Send className="h-3 w-3" />
+                          {t('agentSpec.resubmit')}
+                        </Button>
+                      )}
                       <Button
                         size="sm"
                         className="h-7 text-xs gap-1.5"
@@ -1422,11 +1427,21 @@ export default function AgentSpecDetailPage() {
               onOffline={handleOffline}
               showCreateDraftButton={false}
               allLabels={detail.labels}
-              onSaveLabels={handleSaveLabels}
+              onSaveLabels={canWriteResource ? handleSaveLabels : undefined}
+              canWrite={canWriteResource}
             />
           </div>
         </SheetContent>
       </Sheet>
+
+      <VisibilityAuthorizationDialog
+        open={visibilityDialogOpen}
+        onOpenChange={setVisibilityDialogOpen}
+        namespaceId={namespaceId}
+        resourceType="agentspec"
+        resourceName={agentSpecName}
+        onSuccess={loadDetail}
+      />
 
       {/* ===== Create Node Dialog ===== */}
       <Dialog open={createNodeOpen} onOpenChange={setCreateNodeOpen}>

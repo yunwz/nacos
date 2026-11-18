@@ -17,6 +17,7 @@
 package com.alibaba.nacos.client.config.impl;
 
 import com.alibaba.nacos.api.exception.NacosException;
+import com.alibaba.nacos.client.remote.RequestIdHttpClientRequestInterceptor;
 import com.alibaba.nacos.common.http.HttpClientBeanHolder;
 import com.alibaba.nacos.common.http.client.HttpClientRequestInterceptor;
 import com.alibaba.nacos.common.http.client.NacosRestTemplate;
@@ -36,7 +37,6 @@ import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.anyString;
 
 class ConfigHttpClientManagerTest {
@@ -70,6 +70,9 @@ class ConfigHttpClientManagerTest {
         // second call should not add a duplicate
         NacosRestTemplate t2 = instance.getNacosRestTemplate();
         assertEquals(afterFirst, t2.getInterceptors().size());
+        assertEquals(1, t2.getInterceptors().stream()
+            .filter(RequestIdHttpClientRequestInterceptor.class::isInstance).count());
+        assertEquals(2, t2.getInterceptors().size());
     }
     
     @Test
@@ -125,7 +128,6 @@ class ConfigHttpClientManagerTest {
         assertNotNull(response);
         assertEquals(NacosException.CLIENT_OVER_THRESHOLD, response.getStatusCode());
         assertEquals(Header.EMPTY, response.getHeaders());
-        assertNull(response.getStatusText());
         try (InputStream body = response.getBody()) {
             byte[] buf = new byte[256];
             int n = body.read(buf);

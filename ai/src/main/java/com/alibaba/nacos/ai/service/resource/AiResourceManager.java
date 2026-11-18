@@ -21,9 +21,9 @@ import com.alibaba.nacos.ai.model.AiResource;
 import com.alibaba.nacos.ai.model.AiResourceVersion;
 import com.alibaba.nacos.ai.pipeline.PublishPipelineExecutor;
 import com.alibaba.nacos.ai.pipeline.model.PipelineCallback;
-import com.alibaba.nacos.ai.pipeline.model.PipelineExecution;
-import com.alibaba.nacos.ai.pipeline.model.PipelineExecutionResult;
-import com.alibaba.nacos.ai.pipeline.model.PipelineExecutionStatus;
+import com.alibaba.nacos.api.ai.model.pipeline.PipelineExecution;
+import com.alibaba.nacos.api.ai.model.pipeline.PipelineExecutionResult;
+import com.alibaba.nacos.api.ai.model.pipeline.PipelineExecutionStatus;
 import com.alibaba.nacos.ai.pipeline.repository.PipelineExecutionRepository;
 import com.alibaba.nacos.ai.service.VisibilityHelper;
 import com.alibaba.nacos.ai.service.repository.AiResourcePersistService;
@@ -72,7 +72,7 @@ public class AiResourceManager {
     
     private static final Logger LOGGER = LoggerFactory.getLogger(AiResourceManager.class);
     
-    private static final int LATEST_ONLINE_VERSION_PAGE_SIZE = 500;
+    private static final int VERSION_SCAN_PAGE_SIZE = 500;
     
     private final AiResourcePersistService aiResourcePersistService;
     
@@ -539,6 +539,16 @@ public class AiResourceManager {
     public QueryCondition buildQueryCondition(String namespaceId, String resourceType,
         String nameLike,
         String bizTagsLike, String action) {
+        return buildQueryCondition(namespaceId, resourceType, nameLike, bizTagsLike, null, null,
+            action);
+    }
+    
+    /**
+     * Build a {@link QueryCondition} with business scope/owner filters intersected with
+     * visibility advice.
+     */
+    public QueryCondition buildQueryCondition(String namespaceId, String resourceType,
+        String nameLike, String bizTagsLike, String scope, String owner, String action) {
         String identity = VisibilityHelper.resolveCurrentIdentity();
         String apiType = VisibilityHelper.resolveCurrentApiType();
         QueryCondition queryCondition = new QueryCondition();
@@ -546,6 +556,8 @@ public class AiResourceManager {
         queryCondition.setType(resourceType);
         queryCondition.setNameLike(nameLike);
         queryCondition.setBizTagsLike(bizTagsLike);
+        queryCondition.setScope(StringUtils.isBlank(scope) ? null : scope);
+        queryCondition.setOwner(StringUtils.isBlank(owner) ? null : owner);
         VisibilityQueryContext context = new VisibilityQueryContext();
         context.setNamespaceId(namespaceId);
         context.setResourceType(resourceType);
@@ -682,13 +694,91 @@ public class AiResourceManager {
         throws NacosException {
         AiResourceVersion v =
             aiResourceVersionPersistService.find(namespaceId, name, type, version);
-        if (v == null
-            || !AiResourceConstants.VERSION_STATUS_DRAFT.equalsIgnoreCase(v.getStatus())) {
+        if (v == null || !isDraftVersion(v)) {
             throw new NacosApiException(NacosException.INVALID_PARAM,
                 ErrorCode.PARAMETER_VALIDATE_ERROR,
                 "Current editing version is not draft: " + version);
         }
         return v;
+    }
+    
+    /**
+     * Find a version row and verify it can be submitted.
+     *
+     * <p>Submit accepts a draft version for review, a reviewing version as an idempotent
+     * no-op, or a reviewed version for resubmission. Online and offline versions are
+     * rejected.</p>
+     *
+     * @throws NacosApiException if version not found or not in a submittable status
+     */
+    public AiResourceVersion requireSubmitVersion(String namespaceId, String name, String type,
+        String version)
+        throws NacosException {
+        AiResourceVersion v =
+            aiResourceVersionPersistService.find(namespaceId, name, type, version);
+        if (v == null) {
+            throw new NacosApiException(NacosException.NOT_FOUND, ErrorCode.RESOURCE_NOT_FOUND,
+                type + " version not found: " + name + "@" + version);
+        }
+        if (!isDraftVersion(v) && !isReviewingVersion(v) && !isReviewedVersion(v)) {
+            throw new NacosApiException(NacosException.INVALID_PARAM,
+                ErrorCode.PARAMETER_VALIDATE_ERROR,
+                "Only draft, reviewing, or reviewed version can be submitted: " + version);
+        }
+        return v;
+    }
+    
+    /**
+     * Validate and normalize a version before submit.
+     *
+     * <p>A reviewing version remains unchanged when its pipeline result is absent, still in
+     * progress, or historical. A current terminal result left on a reviewing version indicates
+     * that pipeline completion persisted the result but did not finish the status transition;
+     * normalize that legacy row to reviewed so it can be resubmitted.</p>
+     */
+    public AiResourceVersion prepareSubmitVersion(String namespaceId, String name, String type,
+        String version) throws NacosException {
+        AiResourceVersion v = requireSubmitVersion(namespaceId, name, type, version);
+        if (!isReviewingVersion(v)) {
+            return v;
+        }
+        PublishPipelineInfo pipelineInfo = parsePublishPipelineInfo(v.getPublishPipelineInfo());
+        if (pipelineInfo == null || Boolean.TRUE.equals(pipelineInfo.getHistorical())) {
+            return v;
+        }
+        PipelineExecutionStatus status = pipelineInfo.getStatus();
+        if (status != PipelineExecutionStatus.APPROVED
+            && status != PipelineExecutionStatus.REJECTED) {
+            return v;
+        }
+        aiResourceVersionPersistService.updateStatus(namespaceId, name, type, version,
+            AiResourceConstants.VERSION_STATUS_REVIEWED);
+        v.setStatus(AiResourceConstants.VERSION_STATUS_REVIEWED);
+        return v;
+    }
+    
+    /**
+     * Check whether the given version row is in draft status.
+     */
+    public static boolean isDraftVersion(AiResourceVersion version) {
+        return version != null && AiResourceConstants.VERSION_STATUS_DRAFT
+            .equalsIgnoreCase(version.getStatus());
+    }
+    
+    /**
+     * Check whether the given version row is in reviewing status.
+     */
+    public static boolean isReviewingVersion(AiResourceVersion version) {
+        return version != null && AiResourceConstants.VERSION_STATUS_REVIEWING
+            .equalsIgnoreCase(version.getStatus());
+    }
+    
+    /**
+     * Check whether the given version row is in reviewed status.
+     */
+    public static boolean isReviewedVersion(AiResourceVersion version) {
+        return version != null && AiResourceConstants.VERSION_STATUS_REVIEWED
+            .equalsIgnoreCase(version.getStatus());
     }
     
     /**
@@ -766,7 +856,11 @@ public class AiResourceManager {
     }
     
     /**
-     * Resolve the target version for a submit operation (explicit version or current editing).
+     * Resolve the target version for a submit operation.
+     *
+     * <p>Draft submit normally resolves from {@code editingVersion}; reviewed resubmit resolves
+     * from {@code reviewingVersion} because reviewed versions remain there until the next
+     * operation.</p>
      *
      * @throws NacosApiException if no target version can be determined
      */
@@ -778,8 +872,11 @@ public class AiResourceManager {
             target = info.getEditingVersion();
         }
         if (StringUtils.isBlank(target)) {
+            target = info.getReviewingVersion();
+        }
+        if (StringUtils.isBlank(target)) {
             throw new NacosApiException(NacosException.NOT_FOUND, ErrorCode.RESOURCE_NOT_FOUND,
-                "No draft version to submit for " + type + ": " + name);
+                "No draft, reviewing, or reviewed version to submit for " + type + ": " + name);
         }
         return target;
     }
@@ -787,14 +884,17 @@ public class AiResourceManager {
     /**
      * Transition a version to reviewing status and update meta pointers accordingly.
      *
-     * <p>Only versions in {@code draft} status are allowed to enter the review stage.
-     * Submitting a version in any other status (reviewing / reviewed / online / offline)
-     * is rejected with {@code INVALID_PARAM} to prevent corrupting formal versions.</p>
+     * <p>Versions in {@code draft} or {@code reviewed} status are allowed to enter
+     * the review stage. A reviewed version is treated as a resubmission.</p>
      */
     public void moveToReviewing(String namespaceId, String name, String type, String version,
         AiResource meta, ResourceVersionInfo info) throws NacosException {
-        // Guard: only draft version can be submitted for review.
-        requireDraftVersion(namespaceId, name, type, version);
+        AiResourceVersion v = requireSubmitVersion(namespaceId, name, type, version);
+        if (!isDraftVersion(v) && !isReviewedVersion(v)) {
+            throw new NacosApiException(NacosException.INVALID_PARAM,
+                ErrorCode.PARAMETER_VALIDATE_ERROR,
+                "Only draft or reviewed version can enter review: " + version);
+        }
         aiResourceVersionPersistService.updateStatus(namespaceId, name, type, version,
             AiResourceConstants.VERSION_STATUS_REVIEWING);
         updateVersionInfoCas(namespaceId, meta, info, latestInfo -> {
@@ -1073,6 +1173,15 @@ public class AiResourceManager {
      */
     public AiResourceVersion toggleVersionOnlineStatus(String namespaceId, AiResource meta,
         ResourceVersionInfo info, String version, boolean online) throws NacosException {
+        return toggleVersionOnlineStatus(namespaceId, meta, info, version, online, null);
+    }
+    
+    /**
+     * Toggle a version and retain its supplied description in the lifecycle CAS when no online or working version remains.
+     */
+    public AiResourceVersion toggleVersionOnlineStatus(String namespaceId, AiResource meta,
+        ResourceVersionInfo info, String version, boolean online, String lastOfflineDescription)
+        throws NacosException {
         String name = meta.getName();
         String type = meta.getType();
         AiResourceVersion v =
@@ -1093,6 +1202,15 @@ public class AiResourceManager {
             latestInfo.setOnlineCnt(online ? cnt + 1 : Math.max(0, cnt - 1));
             refreshLatestLabelForOnlineVersions(namespaceId, name, type, latestInfo);
             return latestInfo;
+        }, (update, latestMeta) -> {
+            if (!online && lastOfflineDescription != null) {
+                ResourceVersionInfo updatedInfo = requireVersionInfo(update);
+                if (updatedInfo.getOnlineCnt() == 0
+                    && StringUtils.isBlank(updatedInfo.getEditingVersion())
+                    && StringUtils.isBlank(updatedInfo.getReviewingVersion())) {
+                    update.setDesc(lastOfflineDescription);
+                }
+            }
         });
         String operation = online ? AiResourceTraceService.OP_ONLINE_VERSION
             : AiResourceTraceService.OP_OFFLINE_VERSION;
@@ -1114,26 +1232,41 @@ public class AiResourceManager {
         }
     }
     
+    /**
+     * Resolve the maximum version that has been published, including online and offline versions.
+     */
+    public String resolveMaxPublishedVersion(String namespaceId, String name, String type) {
+        return resolveMaxVersion(namespaceId, name, type,
+            AiResourceConstants.VERSION_STATUS_ONLINE,
+            AiResourceConstants.VERSION_STATUS_OFFLINE);
+    }
+    
     private String resolveLatestOnlineVersion(String namespaceId, String name, String type) {
+        return resolveMaxVersion(namespaceId, name, type,
+            AiResourceConstants.VERSION_STATUS_ONLINE);
+    }
+    
+    private String resolveMaxVersion(String namespaceId, String name, String type,
+        String... statuses) {
         List<String> versions = new ArrayList<>();
-        int pageNo = 1;
-        while (true) {
-            Page<AiResourceVersion> page =
-                aiResourceVersionPersistService.list(namespaceId, name, type,
-                    AiResourceConstants.VERSION_STATUS_ONLINE, pageNo,
-                    LATEST_ONLINE_VERSION_PAGE_SIZE);
-            if (page == null || page.getPageItems() == null || page.getPageItems().isEmpty()) {
-                break;
-            }
-            for (AiResourceVersion v : page.getPageItems()) {
-                if (v != null && StringUtils.isNotBlank(v.getVersion())) {
-                    versions.add(v.getVersion().trim());
+        for (String status : statuses) {
+            int pageNo = 1;
+            while (true) {
+                Page<AiResourceVersion> page = aiResourceVersionPersistService.list(namespaceId,
+                    name, type, status, pageNo, VERSION_SCAN_PAGE_SIZE);
+                if (page == null || page.getPageItems() == null || page.getPageItems().isEmpty()) {
+                    break;
                 }
+                for (AiResourceVersion v : page.getPageItems()) {
+                    if (v != null && StringUtils.isNotBlank(v.getVersion())) {
+                        versions.add(v.getVersion().trim());
+                    }
+                }
+                if (page.getPageItems().size() < VERSION_SCAN_PAGE_SIZE) {
+                    break;
+                }
+                pageNo++;
             }
-            if (page.getPageItems().size() < LATEST_ONLINE_VERSION_PAGE_SIZE) {
-                break;
-            }
-            pageNo++;
         }
         if (versions.isEmpty()) {
             return null;
@@ -1259,20 +1392,19 @@ public class AiResourceManager {
             && !StringUtils.equals(info.getEditingVersion(), version))
             || (StringUtils.isNotBlank(info.getReviewingVersion())
                 && !StringUtils.equals(info.getReviewingVersion(), version))) {
-            throwWorkingVersionConflict(action, version);
+            throw workingVersionConflict(action, version);
         }
     }
     
     private static void ensureWorkingVersionMatches(String actual, String expected, String action)
         throws NacosException {
         if (!StringUtils.equals(actual, expected)) {
-            throwWorkingVersionConflict(action, expected);
+            throw workingVersionConflict(action, expected);
         }
     }
     
-    private static void throwWorkingVersionConflict(String action, String version)
-        throws NacosException {
-        throw new NacosApiException(NacosException.CONFLICT, ErrorCode.RESOURCE_CONFLICT,
+    private static NacosApiException workingVersionConflict(String action, String version) {
+        return new NacosApiException(NacosException.CONFLICT, ErrorCode.RESOURCE_CONFLICT,
             "Working version changed, cannot " + action + ": " + version);
     }
     
@@ -1302,21 +1434,52 @@ public class AiResourceManager {
      */
     public void deleteResourceWithVersions(String namespaceId, String name, String type,
         VersionStorageDeleter storageDeleter) throws NacosException {
-        aiResourcePersistService.delete(namespaceId, name, type);
-        Page<AiResourceVersion> versions =
-            aiResourceVersionPersistService.list(namespaceId, name, type, null, 1, 200);
-        aiResourceVersionPersistService.deleteByNameAndType(namespaceId, name, type);
-        if (versions != null && versions.getPageItems() != null) {
-            for (AiResourceVersion v : versions.getPageItems()) {
-                if (v == null || StringUtils.isBlank(v.getVersion())) {
-                    continue;
+        List<AiResourceVersion> versions = listAllVersions(namespaceId, name, type);
+        NacosException firstFailure = null;
+        for (AiResourceVersion v : versions) {
+            String version = v == null ? "unknown" : v.getVersion();
+            try {
+                if (v == null || StringUtils.isBlank(version)) {
+                    throw new NacosException(NacosException.SERVER_ERROR,
+                        "AI resource Version row is invalid: " + name);
                 }
                 storageDeleter.deleteStorage(v);
+            } catch (Exception e) {
+                NacosException failure = e instanceof NacosException ? (NacosException) e
+                    : new NacosException(NacosException.SERVER_ERROR,
+                        "Failed to delete AI resource storage: " + name + '@' + version, e);
+                if (firstFailure == null) {
+                    firstFailure = failure;
+                } else {
+                    firstFailure.addSuppressed(failure);
+                }
             }
         }
+        if (firstFailure != null) {
+            throw firstFailure;
+        }
+        aiResourcePersistService.delete(namespaceId, name, type);
+        aiResourceVersionPersistService.deleteByNameAndType(namespaceId, name, type);
         AiResourceTraceService.logSuccess(type, name, null,
             AiResourceTraceService.OP_DELETE_RESOURCE,
             VisibilityHelper.resolveCurrentIdentity(), VisibilityHelper.resolveClientIp());
+    }
+    
+    private List<AiResourceVersion> listAllVersions(String namespaceId, String name, String type) {
+        List<AiResourceVersion> result = new ArrayList<>();
+        int pageNo = 1;
+        while (true) {
+            Page<AiResourceVersion> page = aiResourceVersionPersistService.list(namespaceId, name,
+                type, null, pageNo, VERSION_SCAN_PAGE_SIZE);
+            if (page == null || page.getPageItems() == null || page.getPageItems().isEmpty()) {
+                return result;
+            }
+            result.addAll(page.getPageItems());
+            if (page.getPageItems().size() < VERSION_SCAN_PAGE_SIZE) {
+                return result;
+            }
+            pageNo++;
+        }
     }
     
     /**
@@ -1374,14 +1537,21 @@ public class AiResourceManager {
             throw new NacosApiException(NacosException.NOT_FOUND, ErrorCode.RESOURCE_NOT_FOUND,
                 type + " version not found: " + name + "@" + version);
         }
-        if (!AiResourceConstants.VERSION_STATUS_REVIEWED.equalsIgnoreCase(v.getStatus())) {
+        boolean reviewed = AiResourceConstants.VERSION_STATUS_REVIEWED
+            .equalsIgnoreCase(v.getStatus());
+        boolean interruptedRetry = AiResourceConstants.VERSION_STATUS_DRAFT
+            .equalsIgnoreCase(v.getStatus())
+            && (StringUtils.equals(info.getReviewingVersion(), version)
+                || StringUtils.equals(info.getEditingVersion(), version));
+        if (!reviewed && !interruptedRetry) {
             throw new NacosApiException(NacosException.INVALID_PARAM,
                 ErrorCode.PARAMETER_VALIDATE_ERROR,
                 "Only reviewed version can be re-edited: " + version);
         }
-        
-        aiResourceVersionPersistService.updateStatus(namespaceId, name, type, version,
-            AiResourceConstants.VERSION_STATUS_DRAFT);
+        if (reviewed) {
+            aiResourceVersionPersistService.updateStatus(namespaceId, name, type, version,
+                AiResourceConstants.VERSION_STATUS_DRAFT);
+        }
         
         // Mark pipeline info as historical so redraft history is not treated as the current review.
         if (StringUtils.isNotBlank(v.getPublishPipelineInfo())) {
@@ -1397,19 +1567,21 @@ public class AiResourceManager {
             }
         }
         
-        if (StringUtils.equals(info.getReviewingVersion(), version)) {
-            updateVersionInfoCas(namespaceId, meta, info, latestInfo -> {
-                ensureWorkingVersionMatches(latestInfo.getReviewingVersion(), version,
-                    "redraft");
-                if (StringUtils.isNotBlank(latestInfo.getEditingVersion())
-                    && !StringUtils.equals(latestInfo.getEditingVersion(), version)) {
-                    throwWorkingVersionConflict("redraft", version);
-                }
+        updateVersionInfoCas(namespaceId, meta, info, latestInfo -> {
+            boolean reviewingTarget = StringUtils.equals(latestInfo.getReviewingVersion(), version);
+            boolean editingTarget = StringUtils.equals(latestInfo.getEditingVersion(), version);
+            if (!reviewingTarget && !editingTarget) {
+                throw workingVersionConflict("redraft", version);
+            }
+            if (StringUtils.isNotBlank(latestInfo.getEditingVersion()) && !editingTarget) {
+                throw workingVersionConflict("redraft", version);
+            }
+            if (reviewingTarget) {
                 latestInfo.setReviewingVersion(null);
-                latestInfo.setEditingVersion(version);
-                return latestInfo;
-            });
-        }
+            }
+            latestInfo.setEditingVersion(version);
+            return latestInfo;
+        });
         
         AiResourceTraceService.logSuccess(type, name, version,
             AiResourceTraceService.OP_REDRAFT,
@@ -1451,7 +1623,7 @@ public class AiResourceManager {
             }
             updateVersionInfoCas(namespaceId, meta, info, latestInfo -> {
                 if (StringUtils.isNotBlank(latestInfo.getEditingVersion())) {
-                    throwWorkingVersionConflict("delete draft", reviewing);
+                    throw workingVersionConflict("delete draft", reviewing);
                 }
                 ensureWorkingVersionMatches(latestInfo.getReviewingVersion(), reviewing,
                     "delete draft");
@@ -1485,6 +1657,58 @@ public class AiResourceManager {
             deleteVersion(namespaceId, name, type, editing);
         }
         AiResourceTraceService.logSuccess(type, name, editing,
+            AiResourceTraceService.OP_DELETE_DRAFT,
+            VisibilityHelper.resolveCurrentIdentity(), VisibilityHelper.resolveClientIp());
+    }
+    
+    /**
+     * Delete one exact current draft with recoverable storage-first ordering.
+     *
+     * <p>This overload is intended for APIs that carry an exact Version. It deletes type-specific
+     * storage, then the Version row, and clears the matching working pointer last. If a failure
+     * occurs after the row is removed, a retry can still clear the retained pointer without
+     * requiring the deleted row.</p>
+     *
+     * @param namespaceId namespace
+     * @param name resource name
+     * @param type resource type
+     * @param version exact draft Version
+     * @param storageDeleter callback to delete resource-specific storage files
+     */
+    public void doDeleteDraft(String namespaceId, String name, String type, String version,
+        VersionStorageDeleter storageDeleter) throws NacosException {
+        AiResource meta = requireMeta(namespaceId, name, type);
+        VisibilityHelper.checkWritableResource(meta);
+        ResourceVersionInfo info = requireVersionInfo(meta);
+        boolean editingTarget = StringUtils.equals(info.getEditingVersion(), version);
+        boolean reviewingTarget = StringUtils.equals(info.getReviewingVersion(), version);
+        AiResourceVersion row =
+            aiResourceVersionPersistService.find(namespaceId, name, type, version);
+        if (!editingTarget && !reviewingTarget) {
+            if (row == null) {
+                return;
+            }
+            throw workingVersionConflict("delete draft", version);
+        }
+        if (row != null) {
+            if (!AiResourceConstants.VERSION_STATUS_DRAFT.equalsIgnoreCase(row.getStatus())) {
+                throw new NacosApiException(NacosException.INVALID_PARAM,
+                    ErrorCode.PARAMETER_VALIDATE_ERROR,
+                    "Only draft version can be deleted: " + version);
+            }
+            storageDeleter.deleteStorage(row);
+            deleteVersion(namespaceId, name, type, version);
+        }
+        updateVersionInfoCas(namespaceId, meta, info, latestInfo -> {
+            if (StringUtils.equals(latestInfo.getEditingVersion(), version)) {
+                latestInfo.setEditingVersion(null);
+            }
+            if (StringUtils.equals(latestInfo.getReviewingVersion(), version)) {
+                latestInfo.setReviewingVersion(null);
+            }
+            return latestInfo;
+        });
+        AiResourceTraceService.logSuccess(type, name, version,
             AiResourceTraceService.OP_DELETE_DRAFT,
             VisibilityHelper.resolveCurrentIdentity(), VisibilityHelper.resolveClientIp());
     }

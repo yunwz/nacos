@@ -256,9 +256,11 @@ class DatasourceMapperDefaultMethodTest {
         
         MapperContext idsContext = new MapperContext();
         idsContext.putWhereParameter(FieldConstant.IDS, Arrays.asList(1L, 2L));
+        idsContext.putWhereParameter(FieldConstant.TENANT_ID, "tenantId");
         MapperResult idsExport = mapper.findAllConfigInfo4Export(idsContext);
         assertTrue(idsExport.getSql().contains("id IN (?, ?)"));
-        assertEquals(Arrays.asList(1L, 2L), idsExport.getParamList());
+        assertTrue(idsExport.getSql().contains("tenant_id = ?"));
+        assertEquals(Arrays.asList(1L, 2L, "tenantId"), idsExport.getParamList());
         
         MapperResult filteredExport = mapper.findAllConfigInfo4Export(context);
         assertTrue(filteredExport.getSql().contains("tenant_id = ?"));
@@ -339,8 +341,9 @@ class DatasourceMapperDefaultMethodTest {
         assertEquals(Arrays.asList("data", "group", "tenant", "formal", 5L),
             blankGray.getParamList());
         
+        // Repository implementations publish grayName only through the where parameters,
+        // so the gray filter must be driven by that map alone.
         context.putWhereParameter(FieldConstant.GRAY_NAME, "gray");
-        context.putContextParameter(FieldConstant.GRAY_NAME, "gray");
         MapperResult withGray = mapper.getNextHistoryInfo(context);
         assertTrue(withGray.getSql().contains("gray_name = ?"));
         assertEquals(Arrays.asList("data", "group", "tenant", "formal", "gray", 5L),

@@ -16,14 +16,18 @@
 
 package com.alibaba.nacos.test.adminapi.ai.skill;
 
+import com.alibaba.nacos.api.ai.model.skills.Skill;
+import com.alibaba.nacos.api.ai.model.skills.SkillResource;
+import com.alibaba.nacos.api.ai.model.skills.SkillUtils;
 import com.alibaba.nacos.api.model.v2.ErrorCode;
 import com.alibaba.nacos.common.http.param.Query;
 import com.alibaba.nacos.common.utils.JacksonUtils;
 import com.alibaba.nacos.test.adminapi.ai.AiAdminApiBaseITCase;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -37,18 +41,64 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Scenario coverage:
  * <ul>
  *     <li>Expected capability: single ZIP upload creates a draft from {@code SKILL.md} plus resource files, precheck
- *     reports existing-draft overwrite target, overwrite updates an editing draft, and batch upload reports successful skill
+ *     reports existing-draft overwrite target, overwrite replaces the complete draft and removes omitted resource files,
+ *     and batch upload reports successful skill
  *     folders with persisted content.</li>
- *     <li>Boundary/validation: namespace defaults to public; upload version resolves from SKILL.md before
- *     targetVersion; duplicate working drafts require overwrite; batch upload keeps valid folders while reporting
- *     invalid folders in {@code failed}.</li>
- *     <li>Exception/error handling: empty and malformed ZIP files, invalid targetVersion, and archives without
+ *     <li>Boundary/validation: namespace defaults to public; precheck accepts only the archive and namespace; upload
+ *     selects the first available version from SKILL.md version, SKILL.md metadata.version, _meta.json, targetVersion,
+ *     and server fallback; short numeric versions are normalized; invalid uploaded versions fall through to
+ *     lower-priority candidates; duplicate working drafts require overwrite; batch upload keeps valid folders while
+ *     reporting a structured result for every folder.</li>
+ *     <li>Exception/error handling: empty and malformed ZIP files and archives without
  *     {@code SKILL.md} return controlled HTTP 400 Result bodies instead of HTTP 500.</li>
  * </ul>
  *
  * @author xiweng.yy
  */
 public class SkillUploadAdminApiOpenApiITCase extends AiAdminApiBaseITCase {
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testCreateAndUploadPreserveEmptyFilesAndMultilineDescription(boolean upload) throws Exception {
+        String name = randomAiName("multiline");
+        String description = "RDS Copilot assistant.\nTriggers: RDS Copilot, SQL optimization\n";
+        Skill skill = new Skill();
+        skill.setName(name);
+        skill.setDescription("Initial description");
+        skill.setSkillMd("---\nname: " + name + "\nversion: 0.0.1\ndescription: |\n"
+                + "  RDS Copilot assistant.\n  Triggers: RDS Copilot, SQL optimization\n---\nInstructions\n");
+        SkillResource resource = new SkillResource();
+        resource.setName("empty.txt");
+        resource.setType("references");
+        resource.setContent("");
+        String resourceId = SkillUtils.generateResourceId("references", "empty.txt");
+        skill.setResource(Map.of(resourceId, resource));
+        addCleanup(() -> deleteSkillQuietly(name));
+        if (upload) {
+            assertUploadSuccess(postMultipartRaw(ADMIN_SKILL_PATH + "/upload", uploadQuery(false, null, null),
+                    "file", name + ".zip", "application/zip", SkillUtils.toZipBytes(skill)), name);
+        } else {
+            Map<String, String> form = skillQueryForm(name);
+            form.put("targetVersion", "0.0.1");
+            form.put("skillCard", JacksonUtils.toJson(skill));
+            postFormOk(ADMIN_SKILL_PATH + "/draft", form);
+        }
+
+        JsonNode detail = getJsonOk(ADMIN_SKILL_PATH, skillQuery(name)).get("data");
+        JsonNode page = getJsonOk(ADMIN_SKILL_LIST_PATH,
+                Query.newInstance().addParam("skillName", name).addParam("search", "accurate")).get("data");
+        JsonNode listed = findByName(page, "name", name);
+        assertEquals(description, detail.path("description").asText());
+        assertEquals(description, listed.path("description").asText());
+        assertEquals(description, detail.path("frontMatter").path("description").asText());
+        assertEquals(detail.get("frontMatter"), listed.get("frontMatter"));
+        assertFalse(detail.path("frontMatter").has("description.Triggers"));
+        JsonNode content = getJsonOk(ADMIN_SKILL_VERSION_PATH, skillVersionQuery(name, "0.0.1")).get("data");
+        assertEquals("", content.path("resource").path(resourceId).path("content").asText(null));
+        ByteResponse downloaded = getRawBytes(ADMIN_SKILL_VERSION_DOWNLOAD_PATH, skillVersionQuery(name, "0.0.1"));
+        assertEquals(200, downloaded.code());
+        assertEquals("", unzipTextEntries(downloaded.body()).get(name + "/references/empty.txt"));
+    }
 
     @Test
     public void testSingleSkillUploadOverwriteAndVersionBump() throws Exception {
@@ -69,30 +119,48 @@ public class SkillUploadAdminApiOpenApiITCase extends AiAdminApiBaseITCase {
                 "file", skillName + ".zip", "application/zip",
                 buildSkillZip(skillName, "1.0.0", "Duplicate body.", "duplicate guide")),
                 409, ErrorCode.RESOURCE_CONFLICT, "working version");
-        JsonNode precheck = assertUploadResult(postJsonRaw(ADMIN_SKILL_PATH
-                        + "/upload/batch/precheck", Query.EMPTY,
-                precheckRequestsJson(skillName, "1.0.0", "duplicate guide", "9.9.9")))
+        JsonNode precheck = assertUploadResult(postMultipartRaw(ADMIN_SKILL_PATH
+                        + "/upload/precheck", precheckQuery(), "file",
+                skillName + ".zip", "application/zip",
+                buildSkillZip(skillName, "1.0.0", "Duplicate body.", "duplicate guide")))
                 .get("data").get(0);
-        assertEquals("WARNING", precheck.get("status").asText(), precheck.toString());
+        assertEquals("DRAFT_EXISTS", precheck.get("precheckCode").asText(), precheck.toString());
         assertEquals(skillName, precheck.get("skillName").asText(), precheck.toString());
-        assertEquals("duplicate guide", precheck.get("description").asText(), precheck.toString());
+        assertTrue(precheck.has("owner"), precheck.toString());
         assertEquals("1.0.0", precheck.get("parsedVersion").asText(), precheck.toString());
-        assertEquals("1.0.0", precheck.get("resolvedVersion").asText(), precheck.toString());
-        assertEquals(1, precheck.get("actions").size(), precheck.toString());
-        assertActionContains(precheck.get("actions"), "OVERWRITE_DRAFT");
+        assertEquals("1.0.0", precheck.get("targetVersion").asText(), precheck.toString());
+        assertEquals("", precheck.get("entryPath").asText(), precheck.toString());
+        assertCompactPrecheckResult(precheck);
         HttpResponse overwritten = postMultipartRaw(ADMIN_SKILL_PATH + "/upload",
                 uploadQuery(true, "9.9.9", "openapi overwrite"), "file", skillName + ".zip",
                 "application/zip",
-                buildSkillZip(skillName, "1.0.0", "Overwritten body.", "overwritten guide"));
+                buildSkillZip(skillName, "1.0.0", "Overwritten body.", null));
         assertUploadSuccess(overwritten, skillName);
         assertSkillContent(getJsonOk(ADMIN_SKILL_VERSION_PATH, skillVersionQuery(skillName, "1.0.0"))
-                .get("data"), skillName, "1.0.0", "Overwritten body.", "overwritten guide");
+                .get("data"), skillName, "1.0.0", "Overwritten body.", null);
 
         postFormOk(ADMIN_SKILL_PATH + "/force-publish", skillPublishForm(skillName, "1.0.0"));
+        assertEquals("ok", postFormOk(ADMIN_SKILL_PATH + "/offline",
+                skillOnlineForm(skillName, "1.0.0", null)).get("data").asText());
+        JsonNode shortVersionPrecheck = assertUploadResult(postMultipartRaw(ADMIN_SKILL_PATH
+                        + "/upload/precheck", precheckQuery(), "file",
+                skillName + ".zip", "application/zip",
+                buildSkillZip(skillName, "1.0", "Short version body.",
+                        "short version guide")))
+                .get("data").get(0);
+        assertEquals("VERSION_ADJUSTED", shortVersionPrecheck.get("precheckCode").asText(),
+                shortVersionPrecheck.toString());
+        assertEquals("1.0", shortVersionPrecheck.get("parsedVersion").asText(),
+                shortVersionPrecheck.toString());
+        assertEquals("1.0.0", shortVersionPrecheck.get("maxPublishedVersion").asText(),
+                shortVersionPrecheck.toString());
+        assertEquals("1.0.1", shortVersionPrecheck.get("targetVersion").asText(),
+                shortVersionPrecheck.toString());
+        assertCompactPrecheckResult(shortVersionPrecheck);
         HttpResponse nextUpload = postMultipartRaw(ADMIN_SKILL_PATH + "/upload",
-                uploadQuery(false, "1.0.0", "openapi next draft"), "file", skillName + ".zip",
+                uploadQuery(false, null, "openapi next draft"), "file", skillName + ".zip",
                 "application/zip",
-                buildSkillZip(skillName, null, "Uploaded body v2.", "uploaded guide v2"));
+                buildSkillZip(skillName, "1.0", "Uploaded body v2.", "uploaded guide v2"));
         assertUploadSuccess(nextUpload, skillName);
         JsonNode meta = getJsonOk(ADMIN_SKILL_PATH, skillQuery(skillName)).get("data");
         assertEquals("1.0.1", meta.get("editingVersion").asText(), meta.toString());
@@ -100,6 +168,43 @@ public class SkillUploadAdminApiOpenApiITCase extends AiAdminApiBaseITCase {
                 .get("data"), skillName, "1.0.1", "Uploaded body v2.", "uploaded guide v2");
     }
 
+    @Test
+    public void testUploadUsesFirstAvailableVersionSource() throws Exception {
+        String skillName = randomAiName("version-source");
+        addCleanup(() -> deleteSkillQuietly(skillName));
+        assertUploadSuccess(postMultipartRaw(ADMIN_SKILL_PATH + "/upload",
+                uploadQuery(false, null, "upload 0.0.1"), "file", skillName + ".zip",
+                "application/zip",
+                buildSkillZip(skillName, "0.0.1", "Body 0.0.1.", "Guide 0.0.1")), skillName);
+        postFormOk(ADMIN_SKILL_PATH + "/force-publish", skillPublishForm(skillName, "0.0.1"));
+        assertUploadSuccess(postMultipartRaw(ADMIN_SKILL_PATH + "/upload",
+                uploadQuery(false, null, "upload 0.0.2"), "file", skillName + ".zip",
+                "application/zip",
+                buildSkillZip(skillName, "0.0.2", "Body 0.0.2.", "Guide 0.0.2")), skillName);
+        postFormOk(ADMIN_SKILL_PATH + "/force-publish", skillPublishForm(skillName, "0.0.2"));
+        
+        JsonNode precheck = assertUploadResult(postMultipartRaw(ADMIN_SKILL_PATH
+                        + "/upload/precheck", precheckQuery(), "file",
+                skillName + ".zip", "application/zip",
+                buildSkillZip(skillName, "0.0.1", "Body 0.0.4.", "Guide 0.0.4")))
+                .get("data").get(0);
+        assertEquals("VERSION_ADJUSTED", precheck.get("precheckCode").asText(),
+                precheck.toString());
+        assertEquals("0.0.1", precheck.get("parsedVersion").asText(), precheck.toString());
+        assertEquals("0.0.2", precheck.get("maxPublishedVersion").asText(),
+                precheck.toString());
+        assertEquals("0.0.3", precheck.get("targetVersion").asText(), precheck.toString());
+        assertCompactPrecheckResult(precheck);
+        
+        assertUploadSuccess(postMultipartRaw(ADMIN_SKILL_PATH + "/upload",
+                uploadQuery(false, "0.0.4", "upload fallback"), "file", skillName + ".zip",
+                "application/zip",
+                buildSkillZip(skillName, "0.0.1", "Body 0.0.4.", "Guide 0.0.4")), skillName);
+        assertSkillContent(getJsonOk(ADMIN_SKILL_VERSION_PATH,
+                skillVersionQuery(skillName, "0.0.4")).get("data"), skillName, "0.0.4",
+                "Body 0.0.4.", "Guide 0.0.4");
+    }
+    
     @Test
     public void testBatchSkillUploadSuccessAndPartialFailure() throws Exception {
         String firstSkill = randomAiName("batch-a");
@@ -114,24 +219,51 @@ public class SkillUploadAdminApiOpenApiITCase extends AiAdminApiBaseITCase {
         assertArrayContains(data.get("succeeded"), firstSkill);
         assertArrayContains(data.get("succeeded"), secondSkill);
         assertEquals(0, data.get("failed").size(), data.toString());
+        assertEquals(2, data.get("results").size(), data.toString());
+        assertBatchSuccess(data.get("results"), firstSkill);
+        assertBatchSuccess(data.get("results"), secondSkill);
         addCleanup(() -> deleteSkillQuietly(firstSkill));
         addCleanup(() -> deleteSkillQuietly(secondSkill));
         assertSkillContent(getJsonOk(ADMIN_SKILL_VERSION_PATH, skillVersionQuery(firstSkill, "1.0.0"))
                 .get("data"), firstSkill, "1.0.0", "Batch body A.", "guide for " + firstSkill);
         assertSkillContent(getJsonOk(ADMIN_SKILL_VERSION_PATH, skillVersionQuery(secondSkill, "1.0.0"))
                 .get("data"), secondSkill, "1.0.0", "Batch body B.", "guide for " + secondSkill);
+        postFormOk(ADMIN_SKILL_PATH + "/force-publish", skillPublishForm(firstSkill, "1.0.0"));
+        Map<String, String> shortVersionSkills = new LinkedHashMap<>();
+        shortVersionSkills.put(firstSkill, "Batch body A v2.");
+        HttpResponse shortVersionBatch = postMultipartRaw(ADMIN_SKILL_PATH + "/upload/batch",
+                uploadQuery(false, null, null), "file", "short-version-skills.zip",
+                "application/zip", buildMultiSkillZip(shortVersionSkills, "1.0"));
+        JsonNode shortVersionData = assertUploadResult(shortVersionBatch).get("data");
+        assertArrayContains(shortVersionData.get("succeeded"), firstSkill);
+        assertEquals(0, shortVersionData.get("failed").size(), shortVersionData.toString());
+        assertEquals(1, shortVersionData.get("results").size(), shortVersionData.toString());
+        assertBatchSuccess(shortVersionData.get("results"), firstSkill);
+        assertSkillContent(getJsonOk(ADMIN_SKILL_VERSION_PATH, skillVersionQuery(firstSkill, "1.0.1"))
+                .get("data"), firstSkill, "1.0.1", "Batch body A v2.", "guide for " + firstSkill);
 
         String validSkill = randomAiName("batch-valid");
+        byte[] partialZip = buildPartiallyInvalidMultiSkillZip(validSkill, "Valid batch body.");
+        JsonNode partialPrecheck = assertUploadResult(postMultipartRaw(ADMIN_SKILL_PATH
+                        + "/upload/precheck", precheckQuery(), "file", "partial.zip",
+                "application/zip", partialZip)).get("data");
+        assertEquals(3, partialPrecheck.size(), partialPrecheck.toString());
+        assertPrecheckFailure(partialPrecheck, "INVALID_SKILL", "invalid-skill/",
+                "YAML front matter");
+        assertPrecheckFailure(partialPrecheck, "NOT_A_SKILL", "not-a-skill/",
+                "SKILL.md not found");
         HttpResponse partial = postMultipartRaw(ADMIN_SKILL_PATH + "/upload/batch",
                 uploadQuery(false, null, null), "file", "partial.zip", "application/zip",
-                buildPartiallyInvalidMultiSkillZip(validSkill, "Valid batch body."));
+                partialZip);
         JsonNode partialData = assertUploadResult(partial).get("data");
         assertArrayContains(partialData.get("succeeded"), validSkill);
-        assertEquals(1, partialData.get("failed").size(), partialData.toString());
-        assertEquals("invalid-skill", partialData.get("failed").get(0).get("name").asText(),
-                partialData.toString());
-        assertFalse(partialData.get("failed").get(0).get("reason").asText().isBlank(),
-                partialData.toString());
+        assertEquals(2, partialData.get("failed").size(), partialData.toString());
+        assertLegacyBatchFailure(partialData.get("failed"), "invalid-skill");
+        assertLegacyBatchFailure(partialData.get("failed"), "not-a-skill");
+        assertEquals(3, partialData.get("results").size(), partialData.toString());
+        assertBatchSuccess(partialData.get("results"), validSkill);
+        assertBatchFailure(partialData.get("results"), "invalid-skill", "INVALID_SKILL");
+        assertBatchFailure(partialData.get("results"), "not-a-skill", "NOT_A_SKILL");
         addCleanup(() -> deleteSkillQuietly(validSkill));
     }
 
@@ -144,10 +276,12 @@ public class SkillUploadAdminApiOpenApiITCase extends AiAdminApiBaseITCase {
         assertError(postMultipartRaw(ADMIN_SKILL_PATH + "/upload", uploadQuery(false, null, null),
                 "file", "plain.zip", "application/zip", "not a zip".getBytes()), 400,
                 ErrorCode.PARSING_DATA_FAILED, "Failed to parse zip file");
-        assertError(postMultipartRaw(ADMIN_SKILL_PATH + "/upload",
+        assertUploadSuccess(postMultipartRaw(ADMIN_SKILL_PATH + "/upload",
                 uploadQuery(false, "bad-version", null), "file", "skill.zip", "application/zip",
-                buildSkillZip(skillName, null, "Body.", "Guide.")), 400,
-                ErrorCode.PARAMETER_VALIDATE_ERROR, "Invalid version from targetVersion parameter");
+                buildSkillZip(skillName, null, "Body.", "Guide.")), skillName);
+        addCleanup(() -> deleteSkillQuietly(skillName));
+        assertSkillContent(getJsonOk(ADMIN_SKILL_VERSION_PATH, skillVersionQuery(skillName, "0.0.1"))
+                .get("data"), skillName, "0.0.1", "Body.", "Guide.");
         assertError(postMultipartRaw(ADMIN_SKILL_PATH + "/upload/batch", uploadQuery(false, null, null),
                 "file", "plain.zip", "application/zip", "not a zip".getBytes()), 400,
                 ErrorCode.PARSING_DATA_FAILED, "Failed to parse zip file");
@@ -160,17 +294,9 @@ public class SkillUploadAdminApiOpenApiITCase extends AiAdminApiBaseITCase {
         addIfNotBlank(query, "commitMsg", commitMsg);
         return query;
     }
-    
-    private String precheckRequestsJson(String skillName, String parsedVersion, String description,
-            String targetVersion) {
-        Map<String, Object> request = new LinkedHashMap<>();
-        request.put("namespaceId", DEFAULT_NAMESPACE);
-        request.put("skillName", skillName);
-        request.put("description", description);
-        request.put("parsedVersion", parsedVersion);
-        request.put("versionSource", "SKILL.md frontmatter");
-        request.put("targetVersion", targetVersion);
-        return JacksonUtils.toJson(Collections.singletonList(request));
+
+    private Query precheckQuery() {
+        return Query.newInstance().addParam("namespaceId", DEFAULT_NAMESPACE);
     }
 
     private void assertUploadSuccess(HttpResponse response, String skillName) {
@@ -193,13 +319,60 @@ public class SkillUploadAdminApiOpenApiITCase extends AiAdminApiBaseITCase {
         }
         throw new AssertionError("Expected " + expected + " in " + array);
     }
-    
-    private void assertActionContains(JsonNode array, String expectedType) {
+
+    private void assertBatchSuccess(JsonNode array, String expected) {
         for (JsonNode item : array) {
-            if (expectedType.equals(item.get("type").asText())) {
+            if (expected.equals(item.get("name").asText())) {
+                assertTrue(item.get("success").asBoolean(), item.toString());
+                assertEquals("SUCCESS", item.get("errorCode").asText(), item.toString());
+                assertEquals("success", item.get("errorMessage").asText(), item.toString());
                 return;
             }
         }
-        throw new AssertionError("Expected action " + expectedType + " in " + array);
+        throw new AssertionError("Expected successful batch item " + expected + " in " + array);
+    }
+
+    private void assertPrecheckFailure(JsonNode array, String precheckCode, String entryPath,
+            String reasonFragment) {
+        for (JsonNode item : array) {
+            if (precheckCode.equals(item.get("precheckCode").asText())
+                    && entryPath.equals(item.get("entryPath").asText())) {
+                assertTrue(item.get("reason").asText().contains(reasonFragment), item.toString());
+                return;
+            }
+        }
+        throw new AssertionError("Expected precheck failure " + entryPath + " in " + array);
+    }
+
+    private void assertBatchFailure(JsonNode array, String name, String errorCode) {
+        for (JsonNode item : array) {
+            if (name.equals(item.get("name").asText())) {
+                assertFalse(item.get("success").asBoolean(), item.toString());
+                assertEquals(errorCode, item.get("errorCode").asText(), item.toString());
+                assertFalse(item.get("errorMessage").asText().isBlank(), item.toString());
+                return;
+            }
+        }
+        throw new AssertionError("Expected batch failure " + name + " in " + array);
+    }
+
+    private void assertLegacyBatchFailure(JsonNode array, String name) {
+        for (JsonNode item : array) {
+            if (name.equals(item.get("name").asText())) {
+                assertFalse(item.get("reason").asText().isBlank(), item.toString());
+                return;
+            }
+        }
+        throw new AssertionError("Expected legacy batch failure " + name + " in " + array);
+    }
+
+    private void assertCompactPrecheckResult(JsonNode precheck) {
+        String[] removedFields = {"description", "latestVersion", "resolvedVersion",
+                "versionSource", "writable",
+                "versionExists", "draftExists", "reviewingExists", "status", "conflictTypes",
+                "warnings", "errors", "actions"};
+        for (String field : removedFields) {
+            assertFalse(precheck.has(field), precheck.toString());
+        }
     }
 }

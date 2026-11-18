@@ -39,8 +39,8 @@ Client SDK 面向应用运行时访问，应只暴露运行时应用通常需要
 - 读取已知配置项，并订阅这些配置的变更；
 - 注册和注销当前应用实例；
 - 查询和订阅应用已知依赖的服务；
-- 注册、解析和订阅运行时 AI 资源，例如 MCP endpoint、A2A agent endpoint、
-  Prompt、Skill 和 AgentSpec；
+- 注册、发现和订阅运行时 AI 资源，包括可调用 Agent Endpoint，并继续保留历史
+  MCP、A2A、Prompt、Skill 和 AgentSpec 兼容面；
 - 在语言 SDK 支持时，提供[分布式锁](../lock/lock-spec.md)等可选运行时原语；
 - 按[客户端运行时规范](../client/README.md)管理自身生命周期、本地缓存、监听器和连接。
 
@@ -63,13 +63,97 @@ Maintainer SDK 面向管理接入，可以暴露 Client SDK 有意不包含的�
 - 命名空间、集群、服务端状态、readiness/liveness、日志级别等维护能力；
 - 配置的列表、搜索、发布、删除、历史、beta、dump 和元数据管理；
 - 服务、实例、集群元数据、订阅者、客户端、健康检查等注册中心维护能力；
-- MCP、A2A、Prompt、Skill、AgentSpec 和 Pipeline 等 AI 资源管理；
+- Agent、MCP、A2A、Prompt、Skill、AgentSpec 和 Pipeline 等 AI 资源管理；
 - 对大规模管理数据提供分页和过滤能力。
 
 Maintainer SDK 应被视为 Nacos Admin API 能力面的类型化门面。只对管理、UI、
 网关或运维工具有意义的能力，应归入 Maintainer SDK，而不是 Client SDK。
 
-## 4. 安全规则
+若通过 Maintainer SDK 暴露 `changeMessage`，普通和 CAS 发布 API 对插入、更新采用相同
+处理；保留已有签名兼容性和省略参数时的行为。删除、Beta/灰度和回滚不增加说明能力。
+历史详情的可选说明及 ext_info 兼容遵循
+[Config 持久化与历史规范](../config/config-persistence-history-spec.md)。
+不因服务端数据源缺少可选说明能力而将原本成功的发布变成 SDK 异常；真实发布错误保持
+原映射。首期不新增应用层 `ConfigService` 方法。具体 SDK 签名及传输入口须随接口方案
+审阅，公开合同变更同时更新对应 SDK IT 和场景文档。
+
+## 4. Agent 与 RAD 目标契约
+
+本节定义 Agent 管理和 [Remote Agent Discovery（RAD）](../ai/rad-protocol-spec.md)
+的目标 SDK 契约，不表示任一 SDK 当前已经实现这些能力。在
+[Agent API 规范](../ai/agent-api-spec.md)定义的 Agent/RAD 能力完成实现和协商前，
+现有 A2A SDK 接口仍是生效的兼容契约。
+
+目标 Client SDK 必须：
+
+- 每个 SDK 实例绑定一个 namespace，公开的 Agent 发现、Watch、注册和注销方法
+  不传 namespace；
+- 提供 Agent Search、带或不带 Filter 的 Discover、Watch 与取消 Watch，以及运行时
+  Endpoint Register 和 Deregister；
+- 通过 `AiService.agent().publishAgent` 提供可选的代码式 Agent 定义发布，新建首版始终普通提交，
+  其他可编辑 draft 按 `autoSubmit` 执行普通 submit Pipeline，既有非 draft 保持不变；
+- 在不修改调用方对象的前提下，把绑定的 namespace 注入传输请求；
+- 按客户端恢复规范在 reconnect 后恢复 Watch 和 Endpoint 发布意图。
+
+代码式定义发布是持久操作，不进入 Endpoint redo；Endpoint 注册仍不得隐式创建 Agent。
+旧 `A2aService` 的多 Version Endpoint redo、AgentCard 轮询订阅和 shutdown 生命周期在兼容窗口内
+必须保持可恢复且资源可释放。
+
+目标 Maintainer SDK 不绑定 namespace；每个 Agent 管理调用都必须显式标识 namespace。
+它提供新的 Agent 管理 Facade，并在 A2A 兼容窗口内继续保留 A2A 管理 Facade。
+
+## 5. MCP 生命周期托管契约
+
+MCP Metadata 和 Version 迁移到通用 AI Resource 生命周期期间，现有 Java Client MCP 接口
+继续作为兼容表面。只要现有操作可以在内部适配，公开方法签名就保持不变：
+
+- Release 继续作为 Direct-Online 兼容写入，并保持相同返回值；
+- Query 保持当前 Serving 投影，省略 Version 时使用 `latest`；
+- Subscription 继续轮询完整 MCP Query 投影，不订阅底层 Naming Service；
+- Endpoint 注销、重连和 Redo 保留 Client 所有的 Runtime Publication 意图，且不创建或删除
+  MCP 定义。
+
+生命周期托管不修改当前 Runtime ServiceName、Cluster、Metadata、Endpoint Request、
+Reconnect Snapshot 或能力协商，也不增加 Runtime Version Range 或多 Transport 字段。
+此类 Endpoint 模型变更需要后续独立兼容设计。
+
+Maintainer SDK 保留现有 MCP 方法作为兼容 Facade，并增加与 Admin MCP Version、Draft、
+Submit、Publish、Force Publish、Redraft、Online、Offline 和 Label 操作一一对应的类型化方法。
+旧 Detail 和 Direct-online Create/Update 方法自 3.3.0 起废弃，计划在 4.0.0 删除；调用方应迁移到
+精确 Version 读取和 Draft-Submit-Publish 流程。跨 Resource List/Search，以及
+Published Version 或完整 Resource Delete 在提供语义等价的类型化方法之前继续保留。每个新管理
+调用都显式标识 Namespace，使用 `mcpName + version`，并与 Admin/Console API 共用同一个
+Lifecycle Application Service。
+
+Draft 创建/更新通过 Request Object 重载复用既有 `createMcpServer` 和 `updateMcpServer` 名称；
+其他公开方法和模型名描述 Version 与用户操作，不暴露内部 Lifecycle 托管机制。
+
+类型化 Request Object 为 `McpServerDraftRequest`、`McpServerVersionCommand` 和
+`McpServerLabelsUpdateRequest`。它们不新增顶层 Namespace 或 `mcpId` 选择器；显式重载
+独立接收 Namespace，便利重载使用默认 Namespace。复用 `McpServerBasicInfo` 内容内的历史
+身份字段不参与 Lifecycle Target 解析。实现把这些对象映射到现有 Admin Form/Query 契约，
+不增加 JSON Body HTTP Route。
+
+现有只接收 `mcpId` 的 Maintainer Overload 继续作为已废弃兼容输入。服务端从 MCP AI Resource
+Row 解析别名，再执行相同的 Name-Based 鉴权和操作。Java Client 不开始填充 Dormant 顶层
+gRPC `mcpId`；当前 Model、Event 和 Release Response ID 字段保持 Wire-Compatible。
+
+Java Client 通过既有 `nacosAiTransportMode` 属性，为 MCP Query、Release、Runtime Endpoint
+Publication 和轮询 Subscription 提供 `grpc`、`http`、`auto`。现有 Overload 继续保持
+Direct-online，等价于 `createDraft=false`。新增两个 Source/Binary Compatible 的 Default
+Overload 接收 `createDraft`；为 `true` 时只创建生命周期 Draft。未实现新操作的第三方
+`AiService` 必须对 `true` 返回 `SERVER_NOT_IMPLEMENTED`，不得静默委托到 Direct-online。
+
+一个 `AiService` 实例为 Agent 与 MCP Runtime Publication 共享一个稳定 HTTP Client Id 和一个
+Heartbeat Coordinator。各领域仍保存自己的完整 Desired Payload；收到
+`HTTP_CLIENT_NOT_FOUND` 时，必须把该 HTTP Client 拥有的 Agent 与 MCP Publication 意图全部
+标记并重放。MCP Subscription 继续使用本地轮询，但每次 Query 都经过选定的 Transport Router。
+
+MCP Client HTTP Input 使用 Canonical `mcpName`，不增加顶层 `mcpId`。Query、Release 分别
+返回既有 `McpServerDetailInfo` 和 String ID 形态，Endpoint 活性复用
+`ClientLivenessInfo`。
+
+## 6. 安全规则
 
 SDK 能力设计必须遵循最小权限原则：
 
@@ -80,7 +164,7 @@ SDK 能力设计必须遵循最小权限原则：
 - 当 API 可以列举或导出大量配置、服务、客户端或元数据时，SDK 文档应明确说明
   可能的数据泄露风险。
 
-## 5. 传输和 API 对齐
+## 7. 传输和 API 对齐
 
 SDK 契约是语义契约，而不是传输契约：
 
@@ -96,7 +180,7 @@ SDK 契约是语义契约，而不是传输契约：
 - SDK 错误应将 Nacos 错误码和校验失败映射为符合语言习惯的异常或结果类型，
   同时保留服务端语义。
 
-## 6. 多语言 SDK 对齐
+## 8. 多语言 SDK 对齐
 
 Java 目前是定义共享 SDK 语义的基准实现。其他语言 SDK 应对齐相同的能力分类：
 

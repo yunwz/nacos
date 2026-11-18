@@ -44,6 +44,12 @@ public class CopilotProperties {
     private String apiKey;
     
     /**
+     * Whether the console cleared the api key. When set, the legacy connection stops
+     * falling back to the process environment, so the credential is really gone.
+     */
+    private Boolean apiKeyCleared;
+    
+    /**
      * Model name.
      */
     private String model = "qwen-turbo";
@@ -57,6 +63,11 @@ public class CopilotProperties {
      * AgentScope Studio Project.
      */
     private String studioProject = "NacosCopilot";
+    
+    /**
+     * Connection selected from the console, empty to use the default order.
+     */
+    private String selectedConnection;
     
     public boolean isEnabled() {
         return enabled;
@@ -90,6 +101,24 @@ public class CopilotProperties {
      */
     public void setApiKey(String apiKey) {
         this.apiKey = apiKey;
+    }
+    
+    /**
+     * Get whether the console cleared the api key.
+     *
+     * @return {@code true} when the api key was cleared from the console, otherwise {@code null}
+     */
+    public Boolean getApiKeyCleared() {
+        return apiKeyCleared;
+    }
+    
+    /**
+     * Set whether the console cleared the api key.
+     *
+     * @param apiKeyCleared {@code true} when the api key was cleared from the console
+     */
+    public void setApiKeyCleared(Boolean apiKeyCleared) {
+        this.apiKeyCleared = apiKeyCleared;
     }
     
     /**
@@ -144,5 +173,23 @@ public class CopilotProperties {
      */
     public void setStudioProject(String studioProject) {
         this.studioProject = studioProject;
+    }
+    
+    /**
+     * Get the connection selected from the console.
+     *
+     * @return selected connection name, or {@code null} to use the default order
+     */
+    public String getSelectedConnection() {
+        return selectedConnection;
+    }
+    
+    /**
+     * Set the connection selected from the console.
+     *
+     * @param selectedConnection selected connection name
+     */
+    public void setSelectedConnection(String selectedConnection) {
+        this.selectedConnection = selectedConnection;
     }
 }

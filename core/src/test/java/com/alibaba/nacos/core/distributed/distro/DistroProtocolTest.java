@@ -20,12 +20,12 @@ import com.alibaba.nacos.core.cluster.ServerMemberManager;
 import com.alibaba.nacos.core.distributed.distro.component.DistroComponentHolder;
 import com.alibaba.nacos.core.distributed.distro.component.DistroDataProcessor;
 import com.alibaba.nacos.core.distributed.distro.component.DistroDataStorage;
-import com.alibaba.nacos.core.distributed.distro.component.DistroTransportAgent;
 import com.alibaba.nacos.core.distributed.distro.entity.DistroData;
 import com.alibaba.nacos.consistency.DataOperation;
 import com.alibaba.nacos.core.distributed.distro.entity.DistroKey;
 import com.alibaba.nacos.core.cluster.Member;
 import com.alibaba.nacos.core.distributed.distro.task.DistroTaskEngineHolder;
+import com.alibaba.nacos.core.distributed.distro.task.delay.DistroDelayTask;
 import com.alibaba.nacos.core.distributed.distro.task.delay.DistroDelayTaskExecuteEngine;
 import com.alibaba.nacos.core.distributed.distro.task.execute.DistroExecuteTaskExecuteEngine;
 import com.alibaba.nacos.core.utils.GlobalExecutor;
@@ -35,10 +35,14 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.quality.Strictness;
 import org.mockito.junit.jupiter.MockitoSettings;
+import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.mock.env.MockEnvironment;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.Collections;
 
@@ -46,12 +50,13 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -70,10 +75,24 @@ class DistroProtocolTest {
     @Mock
     private DistroTaskEngineHolder distroTaskEngineHolder;
     
+    @Mock
+    private DistroDelayTaskExecuteEngine delayTaskExecuteEngine;
+    
+    @Mock
+    private DistroExecuteTaskExecuteEngine executeTaskExecuteEngine;
+    
     private DistroProtocol distroProtocol;
+    
+    private ConfigurableEnvironment originalEnvironment;
+    
+    private Boolean originalStandalone;
     
     @BeforeEach
     void setUp() {
+        originalEnvironment = EnvUtil.getEnvironment();
+        originalStandalone = (Boolean) ReflectionTestUtils.getField(EnvUtil.class, "isStandalone");
+        // Static mocking initializes GlobalExecutor, which reads the environment on first use.
+        EnvUtil.setEnvironment(new MockEnvironment());
         EnvUtil.setIsStandalone(true);
         when(memberManager.allMembersWithoutSelf()).thenReturn(Collections.emptyList());
         distroProtocol =
@@ -82,7 +101,8 @@ class DistroProtocolTest {
     
     @AfterEach
     void tearDown() {
-        EnvUtil.setIsStandalone(null);
+        EnvUtil.setIsStandalone(originalStandalone);
+        EnvUtil.setEnvironment(originalEnvironment);
     }
     
     @Test
@@ -278,102 +298,37 @@ class DistroProtocolTest {
     }
     
     @Test
-    void testQueryFromRemoteWhenTargetServerNull() {
-        DistroKey key = new DistroKey("key", "type");
-        key.setTargetServer(null);
-        
-        DistroData result = distroProtocol.queryFromRemote(key);
-        
-        assertNull(result);
-    }
-    
-    @Test
-    void testQueryFromRemoteWhenTransportAgentNotFound() {
-        DistroKey key = new DistroKey("key", "type", "1.1.1.1:8848");
-        when(distroComponentHolder.findTransportAgent("type")).thenReturn(null);
-        
-        DistroData result = distroProtocol.queryFromRemote(key);
-        
-        assertNull(result);
-    }
-    
-    @Test
-    void testQueryFromRemoteWhenTransportAgentFound() {
-        DistroKey key = new DistroKey("key", "type", "1.1.1.1:8848");
-        DistroData expected = new DistroData(key, new byte[] {1});
-        DistroTransportAgent agent = new DistroTransportAgent() {
-            
-            @Override
-            public boolean supportCallbackTransport() {
-                return false;
-            }
-            
-            @Override
-            public boolean syncData(DistroData data, String targetServer) {
-                return false;
-            }
-            
-            @Override
-            public void syncData(DistroData data, String targetServer,
-                com.alibaba.nacos.core.distributed.distro.component.DistroCallback callback) {
-            }
-            
-            @Override
-            public boolean syncVerifyData(DistroData verifyData, String targetServer) {
-                return false;
-            }
-            
-            @Override
-            public void syncVerifyData(DistroData verifyData, String targetServer,
-                com.alibaba.nacos.core.distributed.distro.component.DistroCallback callback) {
-            }
-            
-            @Override
-            public DistroData getData(DistroKey key, String targetServer) {
-                return expected;
-            }
-            
-            @Override
-            public DistroData getDatumSnapshot(String targetServer) {
-                return null;
-            }
-        };
-        when(distroComponentHolder.findTransportAgent("type")).thenReturn(agent);
-        
-        DistroData result = distroProtocol.queryFromRemote(key);
-        
-        assertSame(expected, result);
-    }
-    
-    @Test
     void testSyncToTargetAddsTask() {
-        DistroTaskEngineHolder realHolder = new DistroTaskEngineHolder(distroComponentHolder);
-        DistroProtocol protocol =
-            new DistroProtocol(memberManager, distroComponentHolder, realHolder);
+        when(distroTaskEngineHolder.getDelayTaskExecuteEngine()).thenReturn(delayTaskExecuteEngine);
         DistroKey key = new DistroKey("res", "type");
-        protocol.syncToTarget(key, DataOperation.CHANGE, "2.2.2.2:8848", 100L);
-        DistroDelayTaskExecuteEngine engine = realHolder.getDelayTaskExecuteEngine();
-        assertNotNull(engine.getProcessor("type"));
+        distroProtocol.syncToTarget(key, DataOperation.CHANGE, "2.2.2.2:8848", 100L);
+        assertSyncTask(new DistroKey("res", "type", "2.2.2.2:8848"), DataOperation.CHANGE, 100L);
     }
     
     @Test
     void testSyncWithMembers() {
-        EnvUtil.setEnvironment(new org.springframework.mock.env.MockEnvironment());
+        when(distroTaskEngineHolder.getDelayTaskExecuteEngine()).thenReturn(delayTaskExecuteEngine);
         Member member = Member.builder().ip("192.168.1.1").port(8848).build();
         when(memberManager.allMembersWithoutSelf()).thenReturn(Collections.singletonList(member));
-        DistroTaskEngineHolder realHolder = new DistroTaskEngineHolder(distroComponentHolder);
-        DistroProtocol protocol =
-            new DistroProtocol(memberManager, distroComponentHolder, realHolder);
         DistroKey key = new DistroKey("res", "type");
-        protocol.sync(key, DataOperation.DELETE);
-        DistroDelayTaskExecuteEngine engine = realHolder.getDelayTaskExecuteEngine();
-        assertNotNull(engine);
+        distroProtocol.sync(key, DataOperation.DELETE);
+        assertSyncTask(new DistroKey("res", "type", member.getAddress()), DataOperation.DELETE,
+            DistroConfig.getInstance().getSyncDelayMillis());
+    }
+    
+    private void assertSyncTask(DistroKey key, DataOperation action, long delay) {
+        ArgumentCaptor<DistroDelayTask> taskCaptor = ArgumentCaptor.forClass(DistroDelayTask.class);
+        verify(delayTaskExecuteEngine).addTask(eq(key), taskCaptor.capture());
+        DistroDelayTask task = taskCaptor.getValue();
+        assertEquals(key, task.getDistroKey());
+        assertEquals(action, task.getAction());
+        assertEquals(delay, task.getTaskInterval());
     }
     
     @Test
     void testStartDistroTaskWhenNotStandalone() {
         when(distroTaskEngineHolder.getExecuteWorkersManager())
-            .thenReturn(new DistroExecuteTaskExecuteEngine());
+            .thenReturn(executeTaskExecuteEngine);
         try (MockedStatic<GlobalExecutor> globalMock = mockStatic(GlobalExecutor.class)) {
             globalMock.when(() -> GlobalExecutor.submitLoadDataTask(any(Runnable.class)))
                 .then(invocation -> null);
@@ -381,16 +336,12 @@ class DistroProtocolTest {
                 () -> GlobalExecutor.schedulePartitionDataTimedSync(any(Runnable.class), anyLong()))
                 .then(invocation -> null);
             EnvUtil.setIsStandalone(false);
-            try {
-                DistroProtocol protocol = new DistroProtocol(memberManager, distroComponentHolder,
-                    distroTaskEngineHolder);
-                assertFalse(protocol.isInitialized());
-                globalMock.verify(() -> GlobalExecutor.submitLoadDataTask(any(Runnable.class)));
-                globalMock.verify(() -> GlobalExecutor
-                    .schedulePartitionDataTimedSync(any(Runnable.class), anyLong()));
-            } finally {
-                EnvUtil.setIsStandalone(null);
-            }
+            DistroProtocol protocol = new DistroProtocol(memberManager, distroComponentHolder,
+                distroTaskEngineHolder);
+            assertFalse(protocol.isInitialized());
+            globalMock.verify(() -> GlobalExecutor.submitLoadDataTask(any(Runnable.class)));
+            globalMock.verify(() -> GlobalExecutor
+                .schedulePartitionDataTimedSync(any(Runnable.class), anyLong()));
         }
     }
 }

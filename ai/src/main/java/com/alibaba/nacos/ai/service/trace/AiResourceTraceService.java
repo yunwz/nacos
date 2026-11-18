@@ -40,6 +40,11 @@ public class AiResourceTraceService {
     // ==================== Operation Constants ====================
     
     /**
+     * Discover an Agent from a client request.
+     */
+    public static final String OP_DISCOVER = "DISCOVER";
+    
+    /**
      * Create a new draft version.
      */
     public static final String OP_CREATE_DRAFT = "CREATE_DRAFT";
@@ -143,6 +148,11 @@ public class AiResourceTraceService {
      * Update resource bizTags.
      */
     public static final String OP_UPDATE_BIZ_TAGS = "UPDATE_BIZ_TAGS";
+    
+    /**
+     * Update a Resource's complete writable metadata.
+     */
+    public static final String OP_UPDATE_RESOURCE = "UPDATE_RESOURCE";
     
     /**
      * Enable resource.

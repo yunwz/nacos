@@ -57,6 +57,18 @@ public class SkillSummary extends SkillBasicInfo {
     private Map<String, String> labels;
     
     /**
+     * Frontmatter of the display version's SKILL.md, or null when unavailable.
+     * Values follow the Skill parser's string representation.
+     */
+    private Map<String, String> frontMatter;
+    
+    /**
+     * Whether custom fields were omitted or shortened in the frontmatter response projection.
+     * Null when frontmatter is unavailable.
+     */
+    private Boolean frontMatterTruncated;
+    
+    /**
      * The version currently being edited (draft).
      */
     private String editingVersion;
@@ -75,6 +87,11 @@ public class SkillSummary extends SkillBasicInfo {
      * Total download count across all versions.
      */
     private Long downloadCount;
+    
+    /**
+     * Whether current requester can modify this skill resource.
+     */
+    private boolean writable;
     
     public String getOwner() {
         return owner;
@@ -124,6 +141,22 @@ public class SkillSummary extends SkillBasicInfo {
         this.labels = labels;
     }
     
+    public Map<String, String> getFrontMatter() {
+        return frontMatter;
+    }
+    
+    public void setFrontMatter(Map<String, String> frontMatter) {
+        this.frontMatter = frontMatter;
+    }
+    
+    public Boolean getFrontMatterTruncated() {
+        return frontMatterTruncated;
+    }
+    
+    public void setFrontMatterTruncated(Boolean frontMatterTruncated) {
+        this.frontMatterTruncated = frontMatterTruncated;
+    }
+    
     public String getEditingVersion() {
         return editingVersion;
     }
@@ -154,5 +187,13 @@ public class SkillSummary extends SkillBasicInfo {
     
     public void setDownloadCount(Long downloadCount) {
         this.downloadCount = downloadCount;
+    }
+    
+    public boolean isWritable() {
+        return writable;
+    }
+    
+    public void setWritable(boolean writable) {
+        this.writable = writable;
     }
 }

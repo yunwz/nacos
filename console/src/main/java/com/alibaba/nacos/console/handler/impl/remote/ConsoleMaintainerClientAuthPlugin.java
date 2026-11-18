@@ -17,11 +17,17 @@
 package com.alibaba.nacos.console.handler.impl.remote;
 
 import com.alibaba.nacos.api.exception.NacosException;
+import com.alibaba.nacos.auth.config.NacosAuthConfig;
 import com.alibaba.nacos.auth.config.NacosAuthConfigHolder;
 import com.alibaba.nacos.common.http.client.NacosRestTemplate;
+import com.alibaba.nacos.common.utils.StringUtils;
 import com.alibaba.nacos.console.config.NacosConsoleAuthConfig;
+import com.alibaba.nacos.core.context.RequestContextHolder;
+import com.alibaba.nacos.plugin.auth.api.IdentityContext;
 import com.alibaba.nacos.plugin.auth.api.LoginIdentityContext;
 import com.alibaba.nacos.plugin.auth.api.RequestResource;
+import com.alibaba.nacos.plugin.auth.api.Resource;
+import com.alibaba.nacos.plugin.auth.constant.Constants;
 import com.alibaba.nacos.plugin.auth.spi.client.AbstractClientAuthService;
 
 import java.util.List;
@@ -34,17 +40,8 @@ import java.util.Properties;
  */
 public class ConsoleMaintainerClientAuthPlugin extends AbstractClientAuthService {
     
-    private LoginIdentityContext identityContext = new LoginIdentityContext();
-    
     @Override
     public Boolean login(Properties properties) {
-        NacosConsoleAuthConfig authConfig =
-            (NacosConsoleAuthConfig) NacosAuthConfigHolder.getInstance()
-                .getNacosAuthConfigByScope(NacosConsoleAuthConfig.NACOS_CONSOLE_AUTH_SCOPE);
-        if (authConfig.isSupportServerIdentity()) {
-            identityContext.setParameter(authConfig.getServerIdentityKey(),
-                authConfig.getServerIdentityValue());
-        }
         return true;
     }
     
@@ -58,7 +55,50 @@ public class ConsoleMaintainerClientAuthPlugin extends AbstractClientAuthService
     
     @Override
     public LoginIdentityContext getLoginIdentityContext(RequestResource resource) {
-        return identityContext;
+        LoginIdentityContext loginIdentityContext = new LoginIdentityContext();
+        if (isIdentityOnlyRequest() && addServerIdentity(loginIdentityContext)) {
+            return loginIdentityContext;
+        }
+        if (addRequestIdentities(loginIdentityContext)) {
+            return loginIdentityContext;
+        }
+        addServerIdentity(loginIdentityContext);
+        return loginIdentityContext;
+    }
+    
+    private boolean addServerIdentity(LoginIdentityContext loginIdentityContext) {
+        NacosAuthConfig authConfig = NacosAuthConfigHolder.getInstance()
+            .getNacosAuthConfigByScope(NacosConsoleAuthConfig.NACOS_CONSOLE_AUTH_SCOPE);
+        if (authConfig != null && authConfig.isSupportServerIdentity()) {
+            loginIdentityContext.setParameter(authConfig.getServerIdentityKey(),
+                authConfig.getServerIdentityValue());
+            return true;
+        }
+        return false;
+    }
+    
+    private boolean isIdentityOnlyRequest() {
+        Resource resource = RequestContextHolder.getContext().getAuthContext().getResource();
+        return resource != null && resource.getProperties() != null
+            && resource.getProperties().containsKey(Constants.Tag.ONLY_IDENTITY);
+    }
+    
+    private boolean addRequestIdentities(LoginIdentityContext loginIdentityContext) {
+        IdentityContext requestIdentityContext =
+            RequestContextHolder.getContext().getAuthContext().getIdentityContext();
+        if (requestIdentityContext == null) {
+            return false;
+        }
+        boolean added = false;
+        for (String identityName : requestIdentityContext.getRequestIdentityNames()) {
+            String identityValue =
+                requestIdentityContext.getParameter(identityName, StringUtils.EMPTY);
+            if (StringUtils.isNotBlank(identityValue)) {
+                loginIdentityContext.setParameter(identityName, identityValue);
+                added = true;
+            }
+        }
+        return added;
     }
     
     @Override

@@ -27,7 +27,7 @@ import com.alibaba.nacos.common.lifecycle.Closeable;
  *
  * @author nacos
  */
-public interface AiClientProxy extends Closeable {
+public interface AiClientProxy extends AgentClientProxy, Closeable {
     
     /**
      * Query prompt by latest/version/label with optional md5 for conditional query.

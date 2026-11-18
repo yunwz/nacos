@@ -17,15 +17,23 @@
 package com.alibaba.nacos.persistence.datasource;
 
 import com.alibaba.nacos.persistence.configuration.DatasourceConfiguration;
+import com.alibaba.nacos.persistence.datasource.mock.MockDriver;
 import com.alibaba.nacos.persistence.exception.NJdbcException;
+import com.alibaba.nacos.plugin.datasource.dialect.DatabaseDialect;
+import com.alibaba.nacos.plugin.datasource.manager.DatabaseDialectManager;
 import com.alibaba.nacos.sys.env.EnvUtil;
 import com.zaxxer.hikari.HikariDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.CannotGetJdbcConnectionException;
 import org.springframework.jdbc.UncategorizedSQLException;
@@ -47,6 +55,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -54,7 +63,10 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -97,18 +109,17 @@ class ExternalDataSourceServiceImplTest {
         try {
             MockEnvironment environment = new MockEnvironment();
             EnvUtil.setEnvironment(environment);
-            environment.setProperty("db.num", "2");
-            environment.setProperty("db.user", "user");
-            environment.setProperty("db.password", "password");
-            environment.setProperty("db.url.0", "1.1.1.1");
-            environment.setProperty("db.url.1", "2.2.2.2");
-            environment.setProperty("db.pool.config.driverClassName",
+            environment.setProperty("nacos.plugin.datasource.db.num", "2");
+            environment.setProperty("nacos.plugin.datasource.db.user", "user");
+            environment.setProperty("nacos.plugin.datasource.db.password", "password");
+            environment.setProperty("nacos.plugin.datasource.db.url.0", "1.1.1.1");
+            environment.setProperty("nacos.plugin.datasource.db.url.1", "2.2.2.2");
+            environment.setProperty("nacos.plugin.datasource.db.pool.config.driver-class-name",
                 "com.alibaba.nacos.persistence.datasource.mock.MockDriver");
             DatasourceConfiguration.setUseExternalDb(true);
             ExternalDataSourceServiceImpl service1 = new ExternalDataSourceServiceImpl();
             assertDoesNotThrow(service1::init);
-            assertEquals("", service1.getDataSourceType());
-            assertEquals("1.1.1.1", service1.getCurrentDbUrl());
+            assertEquals("mysql", service1.getDataSourceType());
             assertNotNull(service1.getJdbcTemplate());
             assertNotNull(service1.getTransactionTemplate());
         } finally {
@@ -128,6 +139,128 @@ class ExternalDataSourceServiceImplTest {
         } finally {
             DatasourceConfiguration.setUseExternalDb(false);
             EnvUtil.setEnvironment(null);
+        }
+    }
+    
+    @Test
+    void testInitUsesCanonicalQueryTimeout() {
+        try {
+            MockEnvironment environment = new MockEnvironment();
+            environment.setProperty("nacos.plugin.datasource.db.query-timeout", "12");
+            EnvUtil.setEnvironment(environment);
+            DatasourceConfiguration.setUseExternalDb(false);
+            ExternalDataSourceServiceImpl service1 = new ExternalDataSourceServiceImpl();
+            service1.init();
+            assertEquals(12, ReflectionTestUtils.getField(service1, "queryTimeout"));
+            assertEquals(12, service1.getJdbcTemplate().getQueryTimeout());
+        } finally {
+            DatasourceConfiguration.setUseExternalDb(false);
+            EnvUtil.setEnvironment(null);
+        }
+    }
+    
+    @ParameterizedTest
+    @CsvSource({"canonical-dialect,,canonical-dialect", ",legacy-dialect,legacy-dialect",
+        "canonical-dialect,legacy-dialect,canonical-dialect", "' ',legacy-dialect,legacy-dialect"})
+    void testDefaultDriverUsesSelectedDialect(String canonicalType, String legacyType,
+        String expectedType) throws Exception {
+        ConfigurableEnvironment previousEnvironment = EnvUtil.getEnvironment();
+        boolean previousUseExternalDb = DatasourceConfiguration.isUseExternalDb();
+        ExternalDataSourceServiceImpl service1 = new ExternalDataSourceServiceImpl();
+        DatabaseDialectManager dialectManager = mock(DatabaseDialectManager.class);
+        DatabaseDialect dialect = mock(DatabaseDialect.class);
+        when(dialectManager.getDialect(expectedType)).thenReturn(dialect);
+        when(dialect.getDefaultDriverClassName()).thenReturn(MockDriver.class.getName());
+        try (MockedStatic<DatabaseDialectManager> managerMock =
+            mockStatic(DatabaseDialectManager.class)) {
+            managerMock.when(DatabaseDialectManager::getInstance).thenReturn(dialectManager);
+            MockEnvironment environment = defaultDriverEnvironment();
+            if (canonicalType != null) {
+                environment.setProperty("nacos.plugin.datasource-dialect.type", canonicalType);
+            }
+            if (legacyType != null) {
+                environment.setProperty("spring.sql.init.platform", legacyType);
+            }
+            EnvUtil.setEnvironment(environment);
+            // Initialize the selected type without scheduling background health checks.
+            DatasourceConfiguration.setUseExternalDb(false);
+            service1.init();
+            service1.reload();
+            
+            assertEquals(expectedType, service1.getDataSourceType());
+            HikariDataSource dataSource =
+                (HikariDataSource) service1.getJdbcTemplate().getDataSource();
+            assertNotNull(dataSource);
+            assertEquals(MockDriver.class.getName(), dataSource.getDriverClassName());
+            verify(dialectManager).getDialect(expectedType);
+            verify(dialect).getDefaultDriverClassName();
+        } finally {
+            closeDataSource(service1);
+            DatasourceConfiguration.setUseExternalDb(previousUseExternalDb);
+            EnvUtil.setEnvironment(previousEnvironment);
+        }
+    }
+    
+    @ParameterizedTest
+    @ValueSource(strings = {"nacos.plugin.datasource-dialect.type", "spring.sql.init.platform"})
+    void testReloadKeepsInitiallySelectedDialect(String selector) throws Exception {
+        ConfigurableEnvironment previousEnvironment = EnvUtil.getEnvironment();
+        boolean previousUseExternalDb = DatasourceConfiguration.isUseExternalDb();
+        ExternalDataSourceServiceImpl service1 = new ExternalDataSourceServiceImpl();
+        DatabaseDialectManager dialectManager = mock(DatabaseDialectManager.class);
+        DatabaseDialect initialDialect = mock(DatabaseDialect.class);
+        DatabaseDialect replacementDialect = mock(DatabaseDialect.class);
+        when(dialectManager.getDialect(anyString()))
+            .thenAnswer(invocation -> "initial-dialect".equals(invocation.getArgument(0))
+                ? initialDialect : replacementDialect);
+        when(initialDialect.getDefaultDriverClassName()).thenReturn(MockDriver.class.getName());
+        try (MockedStatic<DatabaseDialectManager> managerMock =
+            mockStatic(DatabaseDialectManager.class)) {
+            managerMock.when(DatabaseDialectManager::getInstance).thenReturn(dialectManager);
+            MockEnvironment environment = defaultDriverEnvironment();
+            environment.setProperty(selector, "initial-dialect");
+            EnvUtil.setEnvironment(environment);
+            DatasourceConfiguration.setUseExternalDb(false);
+            service1.init();
+            service1.reload();
+            HikariDataSource originalDataSource =
+                (HikariDataSource) service1.getJdbcTemplate().getDataSource();
+            assertNotNull(originalDataSource);
+            assertEquals(MockDriver.class.getName(), originalDataSource.getDriverClassName());
+            
+            environment.setProperty(selector, "replacement-dialect");
+            service1.reload();
+            
+            assertEquals("initial-dialect", service1.getDataSourceType());
+            HikariDataSource reloadedDataSource =
+                (HikariDataSource) service1.getJdbcTemplate().getDataSource();
+            assertNotNull(reloadedDataSource);
+            assertNotSame(originalDataSource, reloadedDataSource);
+            assertTrue(originalDataSource.isClosed());
+            assertEquals(MockDriver.class.getName(), reloadedDataSource.getDriverClassName());
+            verify(dialectManager, times(2)).getDialect("initial-dialect");
+            verify(dialectManager, never()).getDialect("replacement-dialect");
+            verify(initialDialect, times(2)).getDefaultDriverClassName();
+            verify(replacementDialect, never()).getDefaultDriverClassName();
+        } finally {
+            closeDataSource(service1);
+            DatasourceConfiguration.setUseExternalDb(previousUseExternalDb);
+            EnvUtil.setEnvironment(previousEnvironment);
+        }
+    }
+    
+    private MockEnvironment defaultDriverEnvironment() {
+        return new MockEnvironment()
+            .withProperty("nacos.plugin.datasource.db.num", "1")
+            .withProperty("nacos.plugin.datasource.db.user", "user")
+            .withProperty("nacos.plugin.datasource.db.password", "password")
+            .withProperty("nacos.plugin.datasource.db.url.0", "jdbc:mock:default-driver");
+    }
+    
+    private void closeDataSource(ExternalDataSourceServiceImpl dataSourceService) {
+        JdbcTemplate jdbcTemplate = dataSourceService.getJdbcTemplate();
+        if (jdbcTemplate != null && jdbcTemplate.getDataSource() instanceof HikariDataSource) {
+            ((HikariDataSource) jdbcTemplate.getDataSource()).close();
         }
     }
     
@@ -200,53 +333,6 @@ class ExternalDataSourceServiceImplTest {
             .thenThrow(
                 new CannotGetJdbcConnectionException("test"));
         assertFalse(service.checkMasterWritable());
-    }
-    
-    @Test
-    void testGetCurrentDbUrl() {
-        HikariDataSource bds = new HikariDataSource();
-        bds.setJdbcUrl("test.jdbc.url");
-        when(jt.getDataSource()).thenReturn(bds);
-        assertEquals("test.jdbc.url", service.getCurrentDbUrl());
-    }
-    
-    @Test
-    void testGetCurrentDbUrlWithoutDatasource() {
-        assertEquals("", service.getCurrentDbUrl());
-    }
-    
-    @Test
-    void testGetHealth() {
-        List<Boolean> isHealthList = new ArrayList<>();
-        ReflectionTestUtils.setField(service, "isHealthList", isHealthList);
-        assertEquals("UP", service.getHealth());
-    }
-    
-    @Test
-    void testGetHealthWithMasterDown() {
-        HikariDataSource dataSource = mock(HikariDataSource.class);
-        when(dataSource.getJdbcUrl()).thenReturn("1.1.1.1");
-        ReflectionTestUtils.setField(service, "dataSourceList",
-            Collections.singletonList(dataSource));
-        List<Boolean> isHealthList = new ArrayList<>();
-        isHealthList.add(Boolean.FALSE);
-        ReflectionTestUtils.setField(service, "isHealthList", isHealthList);
-        assertEquals("DOWN:1.1.1.1", service.getHealth());
-    }
-    
-    @Test
-    void testGetHealthWithSlaveDown() {
-        HikariDataSource dataSource = mock(HikariDataSource.class);
-        when(dataSource.getJdbcUrl()).thenReturn("2.2.2.2");
-        List<HikariDataSource> dataSourceList = new ArrayList<>();
-        dataSourceList.add(null);
-        dataSourceList.add(dataSource);
-        ReflectionTestUtils.setField(service, "dataSourceList", dataSourceList);
-        List<Boolean> isHealthList = new ArrayList<>();
-        isHealthList.add(Boolean.TRUE);
-        isHealthList.add(Boolean.FALSE);
-        ReflectionTestUtils.setField(service, "isHealthList", isHealthList);
-        assertEquals("WARN:2.2.2.2", service.getHealth());
     }
     
     @Test

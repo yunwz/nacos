@@ -69,9 +69,32 @@ Clients may re-query the server on subscription setup, reconnect, cache miss, or
 polling fallback. Local disk cache is a recovery and failover aid, not a
 durable server-side source of truth.
 
+Java SDK discovery queries with `subscribe=true` use an existing cached
+service-info view for subsequent query processing without synchronous
+resubscription when an active local subscription intent exists, even if that
+subscription is pending recovery or has not yet succeeded. Background Redo is
+responsible for retrying subscription
+recovery. Without active intent, disk-cache startup and queries after completed
+cancellation retain the
+existing synchronous subscription and cache-fallback path. Cache misses, explicit
+listener subscription, and `subscribe=false` queries retain their existing paths.
+The contract follows the [Client Local Cache And Redo Spec](../client/client-local-cache-redo-spec.md#41-cached-reads-with-active-naming-subscription-intent).
+
 Server push fan-out and retry work must follow the
 [Runtime Push And Reconnect Spec](../client/runtime-push-reconnect-spec.md) and
 the [Task Execution Spec](../design/foundation-task-execution-spec.md).
+
+`NamingEvent.isFromPush()` identifies the notification processing path:
+synchronous subscription responses and direct cache replays return
+`false`; server pushes, background query refreshes, and Failover notifications return `true`.
+
+| Notification path | `isFromPush()` |
+| --- | --- |
+| Server push handled as `NotifySubscriberRequest`, including pushes after reconnect | `true` |
+| Synchronous subscription response processed by the client | `false` |
+| Existing cache replayed directly to a newly registered local listener | `false` |
+| Background polling/query refresh | `true` |
+| Failover data changes or switching back to the normal cached view | `true` |
 
 ## 4. Fuzzy Watch
 

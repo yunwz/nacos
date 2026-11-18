@@ -36,6 +36,23 @@ import com.alibaba.nacos.config.server.model.form.ConfigFormV3;
 import com.alibaba.nacos.config.server.utils.RequestUtil;
 import com.alibaba.nacos.console.proxy.config.ConfigProxy;
 import com.alibaba.nacos.sys.env.EnvUtil;
+import com.alibaba.nacos.auth.config.NacosAuthConfig;
+import com.alibaba.nacos.core.auth.AuthFilter;
+import com.alibaba.nacos.core.auth.InnerApiAuthEnabled;
+import com.alibaba.nacos.core.code.ControllerMethodsCache;
+import com.alibaba.nacos.core.context.RequestContextHolder;
+import com.alibaba.nacos.plugin.auth.api.AuthResult;
+import com.alibaba.nacos.plugin.auth.api.Permission;
+import com.alibaba.nacos.plugin.auth.exception.AccessException;
+import com.alibaba.nacos.plugin.auth.spi.server.AuthPluginManager;
+import com.alibaba.nacos.plugin.auth.spi.server.AuthPluginService;
+import org.junit.jupiter.api.AfterEach;
+import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.mock.web.MockPart;
+import org.springframework.test.web.servlet.MvcResult;
+import java.lang.reflect.Method;
+import java.util.Optional;
+import org.mockito.MockedStatic;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
@@ -55,6 +72,7 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.RequestBuilder;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.request.MockMultipartHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
@@ -96,14 +114,134 @@ public class ConsoleConfigControllerTest {
     
     private MockMvc mockmvc;
     
+    private ConfigurableEnvironment previousEnvironment;
+    
     @Mock
     private ConfigProxy configProxy;
     
     @BeforeEach
     void setUp() {
+        previousEnvironment = EnvUtil.getEnvironment();
         EnvUtil.setEnvironment(new StandardEnvironment());
         consoleConfigController = new ConsoleConfigController(configProxy);
         mockmvc = MockMvcBuilders.standaloneSetup(consoleConfigController).build();
+    }
+    
+    @Test
+    void testCloneAuthUsesExplicitEmptyTargetWithDifferentSource() throws Exception {
+        MvcResult result = performWithNamespaceAuth("cloneConfig",
+            MockMvcRequestBuilders.post("/v3/console/cs/config/clone")
+                .param("targetNamespaceId", "").param("namespaceId", "source")
+                .param("tenant", "ignored").contentType("application/json").content("[]"),
+            "public", false);
+        assertEquals(200, result.getResponse().getStatus());
+        verify(configProxy).cloneConfig(any(), eq("source"), eq("public"), any(),
+            any(), any(), any());
+    }
+    
+    @Test
+    void testCloneAuthRejectsAmbiguousSourceAndTarget() throws Exception {
+        for (String field : new String[] {"targetNamespaceId", "namespaceId"}) {
+            MvcResult result = performWithNamespaceAuth("cloneConfig",
+                MockMvcRequestBuilders.post("/v3/console/cs/config/clone")
+                    .param("targetNamespaceId", "target").param(field, "source", "other")
+                    .contentType("application/json").content("[]"),
+                "target", false);
+            assertEquals(400, result.getResponse().getStatus());
+        }
+    }
+    
+    @Test
+    void testCloneAuthPluginFailureAndExceptionPreventExecution() throws Exception {
+        for (boolean thrown : new boolean[] {false, true}) {
+            MvcResult result = performWithNamespaceAuth("cloneConfig",
+                MockMvcRequestBuilders.post("/v3/console/cs/config/clone")
+                    .param("targetNamespaceId", "target").contentType("application/json")
+                    .content("[]"),
+                "different", thrown);
+            assertEquals(403, result.getResponse().getStatus());
+        }
+        Mockito.verifyNoInteractions(configProxy);
+    }
+    
+    @Test
+    void testExportAuthMatchesFormDefaultBinding() throws Exception {
+        for (String field : new String[] {"namespaceId[]", "!namespaceId"}) {
+            MvcResult result = performWithNamespaceAuth("exportConfigV2",
+                MockMvcRequestBuilders.get("/v3/console/cs/config/export2")
+                    .param(field, "fallback"),
+                "public", false);
+            assertEquals(400, result.getResponse().getStatus());
+        }
+        Mockito.verifyNoInteractions(configProxy);
+    }
+    
+    @Test
+    void testImportAuthRejectsNamespaceFilePart() throws Exception {
+        MockMultipartHttpServletRequestBuilder builder =
+            MockMvcRequestBuilders.multipart("/v3/console/cs/config/import");
+        builder.part(new MockPart("namespaceId", "namespace.txt", new byte[0]));
+        MvcResult result =
+            performWithNamespaceAuth("importAndPublishConfig", builder, "public", false);
+        assertEquals(400, result.getResponse().getStatus());
+        Mockito.verifyNoInteractions(configProxy);
+    }
+    
+    @Test
+    void testBatchDeleteAuthRejectsRepeatedNamespace() throws Exception {
+        MvcResult result = performWithNamespaceAuth("batchDeleteConfigs",
+            MockMvcRequestBuilders.delete("/v3/console/cs/config/batchDelete")
+                .param("namespaceId", "first", "second").param("ids", "1"),
+            "first", false);
+        assertEquals(400, result.getResponse().getStatus());
+        Mockito.verifyNoInteractions(configProxy);
+    }
+    
+    /**
+     * Exercises the actual auth service/parser and MVC Controller with a scoped plugin double.
+     */
+    private MvcResult performWithNamespaceAuth(String methodName,
+        RequestBuilder request, String allowedNamespace, boolean throwDenied)
+        throws Exception {
+        NacosAuthConfig authConfig = Mockito.mock(NacosAuthConfig.class);
+        when(authConfig.isAuthEnabled()).thenReturn(true);
+        when(authConfig.getNacosAuthSystemType()).thenReturn("namespace-test");
+        when(authConfig.getServerIdentityKey()).thenReturn("test-server-identity");
+        when(authConfig.getServerIdentityValue()).thenReturn("server");
+        ControllerMethodsCache cache = Mockito.mock(ControllerMethodsCache.class);
+        Method method = Arrays.stream(ConsoleConfigController.class.getMethods())
+            .filter(candidate -> candidate.getName().equals(methodName)).findFirst().orElseThrow();
+        when(cache.getMethod(any())).thenReturn(method);
+        AuthPluginManager manager = Mockito.mock(AuthPluginManager.class);
+        AuthPluginService plugin = Mockito.mock(AuthPluginService.class);
+        when(manager.findAuthServiceSpiImpl("namespace-test")).thenReturn(Optional.of(plugin));
+        when(plugin.enableAuth(any(), anyString())).thenReturn(true);
+        when(plugin.validateIdentity(any(), any())).thenReturn(AuthResult.successResult());
+        when(plugin.validateAuthority(any(), any())).thenAnswer(invocation -> {
+            Permission permission = invocation.getArgument(1);
+            if (allowedNamespace.equals(permission.getResource().getNamespaceId())) {
+                return AuthResult.successResult();
+            }
+            if (throwDenied) {
+                throw new AccessException("namespace denied");
+            }
+            return AuthResult.failureResult(403, "namespace denied");
+        });
+        try (MockedStatic<AuthPluginManager> mocked = Mockito.mockStatic(AuthPluginManager.class)) {
+            mocked.when(AuthPluginManager::getInstance).thenReturn(manager);
+            AuthFilter filter =
+                new AuthFilter(authConfig, cache, Mockito.mock(InnerApiAuthEnabled.class));
+            return MockMvcBuilders.standaloneSetup(consoleConfigController).addFilters(filter)
+                .build().perform(request).andReturn();
+        } finally {
+            RequestContextHolder.removeContext();
+        }
+    }
+    
+    @AfterEach
+    void restoreNamespaceTestEnvironment() {
+        EnvUtil.setEnvironment(previousEnvironment);
+        RequestContextHolder.removeContext();
     }
     
     @Test
@@ -186,12 +324,15 @@ public class ConsoleConfigControllerTest {
         when(RequestUtil.getRemoteIp(any(HttpServletRequest.class))).thenReturn(clientIp);
         when(RequestUtil.getSrcUserName(any(HttpServletRequest.class))).thenReturn(srcUser);
         List<Long> ids = Arrays.asList(1L, 2L, 3L);
+        String namespaceId = "namespace";
         
-        when(configProxy.batchDeleteConfigs(eq(ids), eq(clientIp), eq(srcUser))).thenReturn(true);
+        when(configProxy.batchDeleteConfigs(eq(ids), eq(namespaceId), eq(clientIp), eq(srcUser)))
+            .thenReturn(true);
         
         MockHttpServletRequestBuilder builder =
             MockMvcRequestBuilders.delete("/v3/console/cs/config/batchDelete")
-                .param("ids", "1,2,3").header("X-Real-IP", clientIp)
+                .param("ids", "1,2,3").param("namespaceId", namespaceId)
+                .header("X-Real-IP", clientIp)
                 .header("X-Forwarded-For", clientIp);
         
         MockHttpServletResponse response = mockmvc.perform(builder).andReturn().getResponse();
@@ -207,7 +348,8 @@ public class ConsoleConfigControllerTest {
         assertTrue(actualResult.getData());
         assertEquals(ErrorCode.SUCCESS.getCode(), actualResult.getCode());
         
-        verify(configProxy).batchDeleteConfigs(eq(ids), eq(clientIp), eq(srcUser));
+        verify(configProxy).batchDeleteConfigs(eq(ids), eq(namespaceId), eq(clientIp),
+            eq(srcUser));
     }
     
     @Test
@@ -436,7 +578,7 @@ public class ConsoleConfigControllerTest {
         expectedResponse.put("status", "success");
         Result<Map<String, Object>> expectedResult = Result.success(expectedResponse);
         
-        when(configProxy.cloneConfig(eq("testUser"), eq("testNamespace"),
+        when(configProxy.cloneConfig(eq("testUser"), eq("testNamespace"), eq("testNamespace"),
             argThat(new ArgumentMatcher<List<SameNamespaceCloneConfigBean>>() {
                 
                 @Override
@@ -462,7 +604,7 @@ public class ConsoleConfigControllerTest {
         
         assertEquals(200, actualStatus);
         
-        verify(configProxy).cloneConfig(any(), eq("testNamespace"),
+        verify(configProxy).cloneConfig(any(), eq("testNamespace"), eq("testNamespace"),
             argThat(new ArgumentMatcher<List<SameNamespaceCloneConfigBean>>() {
                 
                 @Override
@@ -473,6 +615,36 @@ public class ConsoleConfigControllerTest {
                         && 1L == argument.get(0).getCfgId();
                 }
             }), eq(SameConfigPolicy.ABORT), eq("127.0.0.1"), eq(null));
+    }
+    
+    @Test
+    void testCloneConfigWithSourceNamespace() throws Exception {
+        SameNamespaceCloneConfigBean sameNamespaceCloneConfigBean =
+            new SameNamespaceCloneConfigBean();
+        sameNamespaceCloneConfigBean.setCfgId(1L);
+        sameNamespaceCloneConfigBean.setDataId("testDataId");
+        sameNamespaceCloneConfigBean.setGroup("testGroup");
+        List<SameNamespaceCloneConfigBean> configBeansList = new ArrayList<>();
+        configBeansList.add(sameNamespaceCloneConfigBean);
+        
+        Result<Map<String, Object>> expectedResult = Result.success(new HashMap<>());
+        when(configProxy.cloneConfig(eq("testUser"), eq("sourceNamespace"),
+            eq("targetNamespace"), any(), eq(SameConfigPolicy.ABORT), eq("127.0.0.1"),
+            eq(null))).thenReturn(expectedResult);
+        
+        MockHttpServletRequestBuilder builder =
+            MockMvcRequestBuilders.post("/v3/console/cs/config/clone")
+                .param("srcUser", "").param("namespaceId", "sourceNamespace")
+                .param("targetNamespaceId", "targetNamespace").param("policy", "ABORT")
+                .content(new ObjectMapper().writeValueAsString(configBeansList))
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("X-Real-IP", "127.0.0.1").header("X-Forwarded-For", "127.0.0.1");
+        
+        MockHttpServletResponse response = mockmvc.perform(builder).andReturn().getResponse();
+        
+        assertEquals(200, response.getStatus());
+        verify(configProxy).cloneConfig(any(), eq("sourceNamespace"), eq("targetNamespace"),
+            any(), eq(SameConfigPolicy.ABORT), eq("127.0.0.1"), eq(null));
     }
     
     @Test

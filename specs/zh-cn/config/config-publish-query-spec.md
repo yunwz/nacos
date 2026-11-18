@@ -43,6 +43,12 @@ CAS 发布必须比较请求携带的 `casMd5` 和已存储 md5。md5 不匹配�
 Config 变更事件。删除灰度配置只会移除指定灰度版本。
 
 兼容接口允许删除不存在的配置表现为成功，但新的管理流程不应把这种结果展示为该资源曾经存在。
+按存储 ID 批量删除属于管理操作；请求必须携带或默认出归一化后的 `namespaceId`，实现只能删除该
+namespace 内匹配的 ID。不存在的 ID 或属于其他 namespace 的 ID 可以被跳过，但不得删除其他
+namespace 的配置。
+
+当前批量删除 API 中的 `ids` 参数属于已废弃并待移除的兼容选择器。后续批量删除 API 应按
+`namespaceId`、`groupName`、`dataId`，或这些身份元组的显式列表选择配置，而不是透出持久化 ID。
 
 ## 3. 运行时查询链
 
@@ -67,10 +73,22 @@ entry/cache lock
 7. 否则返回正式配置内容、md5、`encryptedDataKey`、最后修改时间和配置类型。
 8. 根据配置类型解析响应 content type，默认使用 text。
 
+已存在的正式配置内容允许为空字符串或仅含空白，查询必须原样返回内容和元数据。
+读取结果为 `null` 时才表示正式配置内容缺失，不得使用空白判断代替存在性判断。
+
 运行时查询必须使用缓存和 dump 内容，而不是大范围持久化查询。共享 dump 与 cache 边界由
 [持久化与 Dump 规范](../design/foundation-persistence-dump-spec.md)定义。
 
+同步运行时查询中的 Config identity 被磁盘路径安全校验拒绝时，HTTP API 必须返回 400 参数校验错误，
+RPC API 必须返回对应的非法参数错误码；不得把该拒绝转换为 500 服务端错误。
+
 ## 4. 管理查询
+
+V3 Admin 和 Console 配置详情响应包含来自配置存储元数据的可选文本字段 `schema`。
+响应保留存储文本（包括显式存储的空字符串）；未存储值时模型字段为 null，
+响应可遵循默认序列化规则省略该字段。
+该字段不改变运行时配置正文或校验行为。
+灰度详情模型继承该字段；灰度存储不保留 schema 元数据，因此模型字段为 null，响应也可省略该字段。
 
 Admin 查询面向管理用户返回配置详情。当存储的配置为加密配置时，Admin 查询会先解密内容，再返回
 详情对象。
@@ -93,13 +111,29 @@ Executor 和队列边界由[任务执行规范](../design/foundation-task-execut
 - 导出打包配置内容和元数据；
 - 导入要求元数据和内容互相匹配，应用请求指定的同名配置策略，并为成功写入发布变更事件；
 - 克隆将选中的配置复制到目标 namespace，并可选择目标 group 或目标 dataId；
+- 克隆中的源配置 ID 只能在归一化后的源 namespace 内解析，克隆结果写入归一化后的目标
+  namespace；缺省源 namespace 时默认等于目标 namespace，以保持同 namespace 克隆兼容；
 - 导入和导出必须保留配置类型、描述、应用名、group、dataId、内容和加密语义。
+- 当导出通过存储 ID 选择配置时，导出结果必须限制在请求中归一化后的 `namespaceId` 内。
+- 当前导出 API 中的 `ids` 选择器属于已废弃并待移除的兼容路径；后续导出选择应基于
+  `namespaceId`、`groupName`、`dataId` 身份，而不是持久化 ID。
 
 ## 7. 接口规则
 
 | 接口面 | 规则 |
 | --- | --- |
 | HTTP Open API | 通过 `/v3/client/cs/config` 查询单个已知配置，不提供 HTTP 监听或大范围管理行为。 |
-| HTTP Admin API | CRUD、元数据、列表/搜索、导入、导出、克隆、beta 查询/删除、监听、容量、指标和运维使用 `/v3/admin/cs/*`。 |
+| HTTP Admin API | CRUD、元数据、列表/搜索、导入、导出、克隆、beta 查询/删除、监听、容量、指标和运维使用 `/v3/admin/cs/*`；Admin 克隆中 `namespaceId` 表示目标 namespace，可选 `sourceNamespaceId` 表示源 namespace。 |
+| HTTP Console API | Console 克隆中 `namespaceId` 表示源 namespace，`targetNamespaceId` 表示目标 namespace；缺省 `namespaceId` 时源 namespace 默认等于目标 namespace。 |
 | gRPC API | 查询、兼容发布、兼容删除、监听、模糊订阅和推送消息必须保持同一套 Config 身份和 md5 语义。 |
 | Client SDK | 应用应优先使用运行时查询和监听 API；大范围管理 API 属于 Maintainer SDK。 |
+
+### 发布操作说明
+
+普通发布及 CAS 发布 API 可选接收 `changeMessage`，对插入和更新采用相同处理，不判断配置
+是否首次创建。控制台新建和删除流程不提供说明入口；删除、Beta、Tag/灰度和回滚 API 不在
+首期支持范围。说明属于本次成功发布，不属于配置描述或正文；省略参数保持原行为，CAS
+失败不得记录说明。
+输入细则（最多 512 个 Unicode 码点）、JSON 存储、历史详情展示、插件降级和验收场景见
+[Config 持久化与历史规范](config-persistence-history-spec.md#发布操作说明)。
+本节描述待审阅的目标，不代表当前 API 已按该范围完成实现和验证。

@@ -51,7 +51,7 @@ Plugins implement `NacosTraceSubscriber`.
 
 | Method | Requirement |
 |--------|-------------|
-| `getName()` | Stable subscriber name. Later duplicate names replace earlier ones. |
+| `getName()` | Stable subscriber name. The first subscriber keeps a duplicate name; later duplicates are ignored with a warning. |
 | `subscribeTypes()` | Trace event classes this subscriber wants to receive. |
 | `onEvent(event)` | Subscriber callback. |
 | `executor()` | Optional executor for asynchronous callback execution. |
@@ -102,6 +102,13 @@ Current AI resource trace event types include:
 `AiResourceTraceEvent` carries the operator, resource type, resource id,
 optional version, operation, status, client IP, and optional extension text.
 
+Agent Discover reuses this event with `resourceType=agent` and `operation=DISCOVER`
+for best-effort access diagnostics. Resource identity and version use the standard
+fields; namespace, access protocol, source application, Client/connection identity
+and subscription attribution use JSON `ext`. See the
+[Agent API spec](../ai/agent-api-spec.md#discover-diagnostic-business-events)
+for fields and scope.
+
 ## Execution
 
 `NacosCombinedTraceSubscriber` registers a domain event publisher and dispatches
@@ -110,11 +117,17 @@ only matching event classes to each plugin subscriber. If `executor()` returns
 remote systems, files, databases, or other slow sinks should return a dedicated
 executor.
 
+The combined subscriber records the event interests of every loaded trace
+implementation, including implementations that are disabled during startup. It
+checks unified plugin state immediately before dispatching each event. Runtime
+enable or disable changes therefore take effect without rebuilding the combined
+subscriber, and a disabled implementation receives no newly dispatched work.
+
 The trace publisher is allowed to degrade by dropping trace events under queue
 pressure, as defined by the local event degradation rules.
 
-Trace subscribers are loaded by SPI. Duplicate names in the same type are not
-stable for production use; plugin packages should use unique names.
+Trace subscribers are loaded by SPI. Duplicate names use first-wins registration with a warning,
+but plugin packages should still use unique names.
 
 ## Degradation
 
